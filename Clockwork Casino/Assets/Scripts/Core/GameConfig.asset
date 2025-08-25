@@ -1,0 +1,41 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fa63b6d6fadb3c64dbd5ef6f619bb8c0, type: 3}
+  m_Name: GameConfig
+  m_EditorClassIdentifier: Assembly-CSharp::ClockworkCasino.Core.GameConfig
+  startTimerSeconds: 30
+  rulePreviewSeconds: 3
+  intermissionEveryNRounds: 5
+  intermissionWindowSeconds: 2
+  borrowPacketSeconds: 10
+  baseCreditSeconds: 10
+  creditGrowthPerScore: 0.5
+  borrowOncePerRound: 1
+  secondsPerTomorrow: 60
+  stakeBands:
+  - RoundMinInclusive: 1
+    RoundMaxInclusive: 3
+    StakeSeconds: 4
+  - RoundMinInclusive: 4
+    RoundMaxInclusive: 6
+    StakeSeconds: 5
+  - RoundMinInclusive: 7
+    RoundMaxInclusive: 9
+    StakeSeconds: 6
+  - RoundMinInclusive: 10
+    RoundMaxInclusive: 99
+    StakeSeconds: 7
+  startCardCount: 3
+  maxCardCount: 6
+  borrowSpikeExtraCards: 1
+  minRoundForCurses: 5
+  cursedRuleWeight: 0.5
