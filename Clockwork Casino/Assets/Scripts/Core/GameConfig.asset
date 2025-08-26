@@ -12,14 +12,20 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: fa63b6d6fadb3c64dbd5ef6f619bb8c0, type: 3}
   m_Name: GameConfig
   m_EditorClassIdentifier: Assembly-CSharp::ClockworkCasino.Core.GameConfig
-  startTimerSeconds: 30
+  startTimerSeconds: 40
   rulePreviewSeconds: 3
-  intermissionEveryNRounds: 5
-  intermissionWindowSeconds: 2
+  dealStaggerPerCard: 0.1
+  dealTravelSeconds: 0.25
+  fanRadius: 40
+  selectRaiseSeconds: 0.25
+  selectRaisePixels: 30
+  resultFlashSeconds: 2
+  intermissionEveryNRounds: 2
+  intermissionWindowSeconds: 10
   borrowPacketSeconds: 10
   baseCreditSeconds: 10
   creditGrowthPerScore: 0.5
-  borrowOncePerRound: 1
+  borrowOncePerRound: 0
   secondsPerTomorrow: 60
   stakeBands:
   - RoundMinInclusive: 1
@@ -33,9 +39,9 @@ MonoBehaviour:
     StakeSeconds: 6
   - RoundMinInclusive: 10
     RoundMaxInclusive: 99
-    StakeSeconds: 7
+    StakeSeconds: 8
   startCardCount: 3
-  maxCardCount: 6
+  maxCardCount: 5
   borrowSpikeExtraCards: 1
-  minRoundForCurses: 5
-  cursedRuleWeight: 0.5
+  minRoundForCurses: 3
+  cursedRuleWeight: 1

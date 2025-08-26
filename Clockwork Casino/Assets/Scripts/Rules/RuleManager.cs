@@ -7,9 +7,14 @@ namespace ClockworkCasino.Rules
 {
     public class RuleManager : MonoBehaviour
     {
-        [SerializeField] private ClockworkCasino.Core.GameConfig _config;
-
+        private ClockworkCasino.Core.GameConfig _config;
         System.Random _rng = new();
+
+        void Awake()
+        {
+            var gm = FindFirstObjectByType<ClockworkCasino.Core.GameManager>();
+            _config = gm ? gm.Config() : null;
+        }
 
         // CLEAN variants (no curses)
         private readonly List<Func<RuleDefinition>> _clean = new()
@@ -41,15 +46,14 @@ namespace ClockworkCasino.Rules
         public RuleDefinition PickRuleForRound(int roundIndex, int stakeSeconds)
         {
             bool allowCursed = _config != null && roundIndex >= _config.minRoundForCurses;
-
-            // Before the threshold, always pick clean
             if (!allowCursed) return PickRandom(_clean);
 
-            // After threshold, pick pool by weight (e.g., 0.5 = 50% cursed)
             float w = Mathf.Clamp01(_config.cursedRuleWeight);
             bool pickCursed = _rng.NextDouble() < w;
 
-            return pickCursed ? PickRandom(_cursed) : PickRandom(_clean);
+            var rule = pickCursed ? PickRandom(_cursed) : PickRandom(_clean);
+            Debug.Log($"[RuleManager] round={roundIndex} allowCursed={allowCursed} w={w} pickCursed={pickCursed} -> {rule.Type}/{rule.CurseMode}");
+            return rule;
         }
 
         private RuleDefinition PickRandom(List<Func<RuleDefinition>> pool)

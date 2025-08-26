@@ -38,7 +38,7 @@ RectTransform:
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 0, y: 0}
   m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 240, y: 300}
+  m_SizeDelta: {x: 160, y: 220}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &6894095265387126136
 CanvasRenderer:
@@ -137,6 +137,9 @@ MonoBehaviour:
   _label: {fileID: 6723337197014324699}
   _button: {fileID: 7524790101566639378}
   _bg: {fileID: 1751779312095395660}
+  _baseColor: {r: 1, g: 1, b: 1, a: 1}
+  _faceDownColor: {r: 0.5849056, g: 0.5849056, b: 0.5849056, a: 1}
+  _cursedBaseTint: {r: 1, g: 0.5235849, b: 0.5235849, a: 1}
 --- !u!1 &5518720834403937600
 GameObject:
   m_ObjectHideFlags: 0

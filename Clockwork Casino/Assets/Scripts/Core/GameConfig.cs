@@ -9,7 +9,17 @@ namespace ClockworkCasino.Core
         [Min(1)] public int startTimerSeconds = 30;
 
         [Header("Round Flow")]
-        [Range(0.25f, 5f)] public float rulePreviewSeconds = 3f;
+        [Range(0.25f, 5f)] public float rulePreviewSeconds = 3.0f;
+
+        [Header("Dealing / Flip")]
+        [Range(0f, 2f)] public float dealStaggerPerCard = 0.1f;    // time between cards leaving the fan
+        [Range(0.05f, 1f)] public float dealTravelSeconds = 0.25f;  // how long one card flies to slot
+        public float fanRadius = 40f;                                // px offset radius for the fan
+
+        [Header("Selection Feedback")]
+        [Range(0.05f, 0.6f)] public float selectRaiseSeconds = 0.12f;
+        public float selectRaisePixels = 20f;
+        [Range(0.05f, 2.0f)] public float resultFlashSeconds = 1.0f;
 
         [Header("Intermissions")]
         [Min(2)] public int intermissionEveryNRounds = 5;
