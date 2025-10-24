@@ -9,13 +9,28 @@ namespace ClockworkCasino.Cards
 {
     public class CardDealer : MonoBehaviour
     {
-        [Header("UI")]
+        [Header("UI Anchors")]
+        [SerializeField] private ClockworkCasino.Audio.SfxPlayer _sfx;
+        [SerializeField] private ClockworkCasino.UI.SlotOutlines _slotOutlines;
         [SerializeField] private RectTransform _slotsContainer;
         [SerializeField] private RectTransform _cardsLayer;
         [SerializeField] private RectTransform _previewAnchor;
+        [SerializeField] private RectTransform _deckAnchor;
         [SerializeField] private CardView _cardPrefab;
 
+        [Header("Timing (Dealer controls the whole pre-round sequence)")]
+        [SerializeField, Min(0f)] private float _delayAfterSpendBeforeSpawn = 0.10f; // pause after HUD spend-fill, before cards appear
+        [SerializeField, Min(0f)] private float _groupTravelSeconds        = 0.35f; // deck -> preview (stack)
+        [SerializeField, Min(0f)] private float _pauseAtPreviewStack       = 0.12f; // pause AFTER stack arrives at preview
+        [SerializeField, Min(0f)] private float _spreadSeconds             = 0.15f; // stack -> horizontal spread (no rotation)
+        [SerializeField, Min(0f)] private float _pauseAfterDeal            = 0.10f; // pause after final card lands, before flip
+
+        [Header("Deck Spawn Polish (optional)")]
+        [SerializeField, Range(0f, 8f)] private float _deckSpawnRotJitter = 2f;
+
+        // Runtime
         CardData[] _currentCards = Array.Empty<CardData>();
+        private CurseVisualMode[] _modePerCard;
         HashSet<int> _finalCorrect = new();
         Action _onPickBegan;
         Action<int, bool> _onPickResolved;
@@ -30,28 +45,34 @@ namespace ClockworkCasino.Cards
             _views.Clear();
         }
 
-        // Orchestrator: handles preview fan, dealing, and flip
+        bool IsColorSensitiveRule(RuleDefinition rule)
+        {
+            var t = rule.DisplayText?.ToLowerInvariant() ?? string.Empty;
+            return t.Contains("red") || t.Contains("black") || t.Contains("color");
+        }
+
+
         public void BeginPreviewAndDeal(
             int count,
             RuleDefinition rule,
-            float previewSeconds,
+            float rulePreviewSeconds,
             float dealStagger,
             float dealTravelSeconds,
-            float fanRadius,
+            float halfSpreadWidth,
             Action onFlipComplete,
             CardData[] forcedCards = null,
-            Func<CardData[], HashSet<int>> computeCorrectness = null
+            Func<CardData[], HashSet<int>> computeCorrectness = null,
+            Action onRulePreviewBegin = null,
+            Action onRulePreviewEnd = null
         )
         {
             StopAllCoroutines();
             Clear();
 
-            Debug.Log($"[Dealer] Rule picked: {rule.Type} / curse={rule.CurseMode} / p={rule.CurseProbability}");
             _customCorrectness = computeCorrectness;
 
-            // 1) Build hand
-            bool isForced = forcedCards != null && forcedCards.Length > 0;
-            if (isForced)
+            // Build hand
+            if (forcedCards != null && forcedCards.Length > 0)
             {
                 _currentCards = forcedCards;
                 count = forcedCards.Length;
@@ -64,38 +85,53 @@ namespace ClockworkCasino.Cards
                     _currentCards[i] = new CardData
                     {
                         value = _rng.Next(2, 15),
-                        suit  = (Suit)_rng.Next(0, 4),
+                        suit = (Suit)_rng.Next(0, 4),
                         cursed = false
                     };
                 }
-
-                // Only ensure solvability for normal (non-forced) hands
                 RuleRuntime.EnsureAtLeastOneValid(_currentCards, rule, _rng);
             }
 
-            // 2) Compute correct set
-            if (_customCorrectness != null)
-            {
-                // RISK MODE: no curses; use provided evaluator
-                _finalCorrect = _customCorrectness(_currentCards);
+            // Correct set
+            _finalCorrect = computeCorrectness != null
+                ? computeCorrectness(_currentCards)
+                : RuleRuntime.GetCorrectAfterCurses(_currentCards, rule);
 
-                // Defensive: a risk challenge should always produce at least one correct
-                if (_finalCorrect == null || _finalCorrect.Count == 0)
-                    Debug.LogWarning("[Dealer] Risk challenge evaluator returned empty set. Check the challenge’s GenerateHand/Evaluate.");
-            }
-            else
-            {
-                // NORMAL MODE: runtime pipeline (with curses)
-                _finalCorrect = RuleRuntime.GetCorrectAfterCurses(_currentCards, rule);
-            }
+            _modePerCard = new CurseVisualMode[count];
 
-            int cursedCount = 0;
-            for (int i = 0; i < _currentCards.Length; i++) if (_currentCards[i].cursed) cursedCount++;
-            Debug.Log($"[Dealer] Correct indices: {_finalCorrect.Count}, cursed on cards: {cursedCount}");
+            StartCoroutine(CoSequence(
+                rule,
+                rulePreviewSeconds,
+                dealStagger,
+                dealTravelSeconds,
+                halfSpreadWidth,
+                onFlipComplete,
+                onRulePreviewBegin,
+                onRulePreviewEnd
+            ));
+        }
 
-            // 3) Create fanned previews & deal to slots
+        IEnumerator CoSequence(
+            RuleDefinition rule,
+            float rulePreviewSeconds,
+            float dealStagger,
+            float dealTravelSeconds,
+            float halfSpreadWidth,
+            Action onFlipComplete,
+            Action onRulePreviewBegin,
+            Action onRulePreviewEnd
+        )
+        {
             var cam = CanvasCamOf(_cardsLayer);
-            for (int i = 0; i < count; i++)
+
+            if (_delayAfterSpendBeforeSpawn > 0f)
+                yield return new WaitForSeconds(_delayAfterSpendBeforeSpawn);
+
+            // 1) Spawn on deck
+            Vector2 deckLocal = WorldToLocalIn(_cardsLayer, _deckAnchor.position, cam);
+
+            int n = _currentCards.Length;
+            for (int i = 0; i < n; i++)
             {
                 var view = Instantiate(_cardPrefab, _cardsLayer);
                 view.SetFaceDown();
@@ -103,35 +139,82 @@ namespace ClockworkCasino.Cards
                 var rt = view.GetComponent<RectTransform>();
                 if (rt)
                 {
-                    Vector2 baseScreen = WorldToScreen(_previewAnchor.position, cam);
-                    float angle = Mathf.Lerp(-15f, 15f, count == 1 ? 0.5f : i / (count - 1f));
-                    float dx = Mathf.Cos(angle * Mathf.Deg2Rad) * fanRadius;
-                    float dy = Mathf.Sin(angle * Mathf.Deg2Rad) * fanRadius * 0.35f;
+                    rt.anchoredPosition = deckLocal;
 
-                    Vector3 startWorld = ScreenToWorldIn(_cardsLayer, baseScreen + new Vector2(dx, dy), cam);
-                    rt.position = startWorld;
-                    rt.localRotation = Quaternion.Euler(0, 0, angle * 0.2f);
+                    float jitter = (_deckSpawnRotJitter > 0f)
+                        ? UnityEngine.Random.Range(-_deckSpawnRotJitter, _deckSpawnRotJitter)
+                        : 0f;
+                    rt.localRotation = Quaternion.Euler(0, 0, jitter);
                 }
                 _views.Add(view);
             }
 
-            StartCoroutine(CoDealToSlotsThenFlip(previewSeconds, dealStagger, dealTravelSeconds, onFlipComplete));
-        }
+            // 2) Move whole stack to preview
+            Vector2 previewLocal = WorldToLocalIn(_cardsLayer, _previewAnchor.position, cam);
 
-        IEnumerator CoDealToSlotsThenFlip(float previewSeconds, float dealStagger, float dealTravelSeconds, Action onFlipComplete)
-        {
-            int n = _views.Count;
-            float totalDealing = Mathf.Max(0f, (n - 1) * dealStagger + dealTravelSeconds);
-            float leadWait = Mathf.Max(0f, previewSeconds - totalDealing);
+            _sfx?.Play(ClockworkCasino.Audio.SfxEvent.DeckSlideToPreview);
+            for (int i = 0; i < n; i++)
+            {
+                var rt = _views[i].GetComponent<RectTransform>();
+                Vector2 from = rt.anchoredPosition;
+                StartCoroutine(FlyAnchored(rt, from, previewLocal, _groupTravelSeconds));
+            }
+            if (_groupTravelSeconds > 0f)
+                yield return new WaitForSeconds(_groupTravelSeconds);
 
-            yield return new WaitForSeconds(leadWait);
+            // 3) Pause at stacked preview
+            if (_pauseAtPreviewStack > 0f)
+                yield return new WaitForSeconds(_pauseAtPreviewStack);
 
-            // ===== 1) Build slot positions from the layout container =====
-            var slotPositions = new List<Vector2>(n);
+            // 4) Spread horizontally around preview center
+            var startLocal  = new Vector2[n];
+            var targetLocal = new Vector2[n];
 
-            // Size probes to match the card prefab so spacing is correct
+            _sfx?.Play(ClockworkCasino.Audio.SfxEvent.CardSpread);
+
+            for (int i = 0; i < n; i++)
+            {
+                var rt = _views[i].GetComponent<RectTransform>();
+                startLocal[i] = rt.anchoredPosition;
+
+                float tNorm = (n == 1) ? 0f : (i - (n - 1) * 0.5f) / ((n - 1) * 0.5f);
+                float dx = tNorm * halfSpreadWidth;
+                targetLocal[i] = previewLocal + new Vector2(dx, 0f);
+            }
+
+            float st = 0f;
+            while (st < _spreadSeconds)
+            {
+                st += Time.deltaTime;
+                float a = Mathf.Clamp01(st / _spreadSeconds);
+                float e = 1f - Mathf.Pow(1f - a, 2f);
+
+                for (int i = 0; i < n; i++)
+                {
+                    var rt = _views[i].GetComponent<RectTransform>();
+                    rt.anchoredPosition = Vector2.Lerp(startLocal[i], targetLocal[i], e);
+                    rt.localRotation = Quaternion.identity;
+                }
+                yield return null;
+            }
+            for (int i = 0; i < n; i++)
+            {
+                var rt = _views[i].GetComponent<RectTransform>();
+                rt.anchoredPosition = targetLocal[i];
+                rt.localRotation = Quaternion.identity;
+            }
+
+            _slotOutlines?.SetCount(n);
+
+            // 5) RULE PREVIEW WINDOW
+            onRulePreviewBegin?.Invoke();
+            if (rulePreviewSeconds > 0f)
+                yield return new WaitForSeconds(rulePreviewSeconds);
+            onRulePreviewEnd?.Invoke();
+
+            // 6) Compute slot positions
             var prefabRT = _cardPrefab.GetComponent<RectTransform>();
-            Vector2 cardSize = prefabRT ? prefabRT.sizeDelta : new Vector2(120, 160);
+            Vector2 size = prefabRT ? prefabRT.sizeDelta : new Vector2(120, 160);
 
             var temps = new List<RectTransform>(n);
             for (int i = 0; i < n; i++)
@@ -139,74 +222,92 @@ namespace ClockworkCasino.Cards
                 var go = new GameObject("SlotProbe", typeof(RectTransform), typeof(LayoutElement));
                 var rt = go.GetComponent<RectTransform>();
                 var le = go.GetComponent<LayoutElement>();
-                le.preferredWidth = cardSize.x;
-                le.preferredHeight = cardSize.y;
+                le.preferredWidth  = size.x;
+                le.preferredHeight = size.y;
 
                 rt.SetParent(_slotsContainer, false);
                 rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
-                rt.pivot = new Vector2(0.5f, 0.5f);
-                rt.sizeDelta = cardSize;
+                rt.pivot     = new Vector2(0.5f, 0.5f);
+                rt.sizeDelta = size;
                 temps.Add(rt);
             }
 
-            var cam = CanvasCamOf(_cardsLayer);
-            var slotWorlds = new List<Vector3>(n);
-
-
             LayoutRebuilder.ForceRebuildLayoutImmediate(_slotsContainer);
 
-            foreach (var t in temps)
+            var slotLocals = new List<Vector2>(n);
+            foreach (var tRt in temps)
             {
-                var centerW = CenterWorld(t);
-                var centerScreen = WorldToScreen(centerW, cam);
-                var endWorld = ScreenToWorldIn(_cardsLayer, centerScreen, cam);
-                slotWorlds.Add(endWorld);
+                var corners = new Vector3[4];
+                tRt.GetWorldCorners(corners);
+                var centerW = (corners[0] + corners[2]) * 0.5f;
+
+                slotLocals.Add(WorldToLocalIn(_cardsLayer, centerW, cam));
             }
             foreach (var t in temps) Destroy(t.gameObject);
 
-            // ===== 2) Reparent cards to CardsLayer BEFORE flying =====
+            // 7) Deal to slots
             for (int i = 0; i < n; i++)
             {
+                _sfx?.PlayVaried(ClockworkCasino.Audio.SfxEvent.CardDeal, 1f, 0.06f, 0.02f);
                 var rt = _views[i].GetComponent<RectTransform>();
-                rt.SetParent(_cardsLayer, worldPositionStays: true);
+                Vector2 from = rt.anchoredPosition;
+                Vector2 to = slotLocals[i];
+                StartCoroutine(FlyAnchored(rt, from, to, dealTravelSeconds));
+                if (dealStagger > 0f) yield return new WaitForSeconds(dealStagger);
             }
+            if (dealTravelSeconds > 0f)
+                yield return new WaitForSeconds(dealTravelSeconds);
 
-            // ===== 3) Fly each card to its slot =====
-            for (int i = 0; i < n; i++)
+            // 8) Brief dwell with face-down cards on the table
+            if (_pauseAfterDeal > 0f)
+                yield return new WaitForSeconds(_pauseAfterDeal);
+
+            // 9) Flip up & complete
+            bool colorSensitive = IsColorSensitiveRule(rule);
+            int currCardsLength = _currentCards.Length;
+
+            for (int i = 0; i < currCardsLength; i++)
             {
-                var rt = _views[i].GetComponent<RectTransform>();
-                Vector3 start = rt.position;
-                Vector3 end   = slotWorlds[i];
-                StartCoroutine(Fly(rt, start, end, dealTravelSeconds));
-                yield return new WaitForSeconds(dealStagger);
-            }
-
-            // Wait for the last travel to finish
-            yield return new WaitForSeconds(dealTravelSeconds);
-
-            // ===== 4) Flip all & enable clicks =====
-            for (int i = 0; i < n; i++)
-            {
+                _sfx?.PlayVaried(ClockworkCasino.Audio.SfxEvent.CardFlip, 1f, 0.05f, 0.02f);
                 bool isCorrect = _finalCorrect.Contains(i);
-                _views[i].SetFaceUp(_currentCards[i], isCorrect);
+
+                var cd = _currentCards[i];
+                CurseVisualMode mode =
+                    !cd.cursed ? CurseVisualMode.None :
+                    colorSensitive ? CurseVisualMode.Stealth :
+                    CurseVisualMode.ColorReversedSuit;
+
+                _modePerCard[i] = mode;
+
+                _views[i].SetFaceUp(cd, isCorrect, mode);
             }
 
             onFlipComplete?.Invoke();
         }
 
-        IEnumerator Fly(RectTransform rt, Vector3 from, Vector3 to, float dur)
+        Vector2 WorldToLocalIn(RectTransform target, Vector3 world, Camera cam)
+        {
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                target,
+                RectTransformUtility.WorldToScreenPoint(cam, world),
+                cam,
+                out var local);
+            return local;
+        }
+
+        IEnumerator FlyAnchored(RectTransform rt, Vector2 from, Vector2 to, float dur)
         {
             float t = 0f;
             while (t < dur)
             {
                 t += Time.deltaTime;
                 float a = Mathf.Clamp01(t / dur);
-                float e = 1f - Mathf.Pow(1f - a, 2f);
-                rt.position = Vector3.Lerp(from, to, e);
+                float e = 1f - Mathf.Pow(1f - a, 2f); // ease-out
+                rt.anchoredPosition = Vector2.Lerp(from, to, e);
                 rt.localRotation = Quaternion.identity;
                 yield return null;
             }
-            rt.position = to;
+            rt.anchoredPosition = to;
             rt.localRotation = Quaternion.identity;
         }
 
@@ -226,12 +327,14 @@ namespace ClockworkCasino.Cards
 
         public void OnExternalClear()
         {
+            _slotOutlines?.HideAll();
             Clear();
         }
 
         void OnCardClicked(int index, bool isCorrect)
         {
             foreach (var v in _views) v.SetInteractable(false);
+            _sfx?.Play(ClockworkCasino.Audio.SfxEvent.SelectStart);
             _onPickBegan?.Invoke();
             StartCoroutine(CoSelectionFeedbackThenResolve(index, isCorrect));
         }
@@ -243,7 +346,6 @@ namespace ClockworkCasino.Cards
 
         IEnumerator CoSelectionFeedbackThenResolve(int index, bool isCorrect)
         {
-            // stop further clicks
             foreach (var v in _views) v.SetInteractable(false);
 
             var green  = new Color(0.6f, 0.95f, 0.6f);
@@ -251,25 +353,28 @@ namespace ClockworkCasino.Cards
             var purple = new Color(0.75f, 0.6f, 0.95f);
 
             var gm      = FindFirstObjectByType<ClockworkCasino.Core.GameManager>();
-            float raise = gm ? gm.Config().selectRaisePixels    : 20f;
-            float rSec  = gm ? gm.Config().selectRaiseSeconds   : 0.12f;
-            float dwell = gm ? gm.Config().resultFlashSeconds   : 0.25f;
+            float raise = gm ? gm.Config().selectRaisePixels  : 20f;
+            float rSec  = gm ? gm.Config().selectRaiseSeconds : 0.12f;
+            float dwell = gm ? gm.Config().resultFlashSeconds : 0.25f;
 
-            // raise the chosen card with no color change yet
+            // raise first, no color yet
             yield return _views[index].StartCoroutine(_views[index].RaiseOnly(raise, rSec));
 
-            // reveal at the apex
+            // reveal at apex
             if (!isCorrect)
             {
-                // tint all correct answers green
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.SelectBad);
                 foreach (var ci in _finalCorrect)
                 {
                     if (ci >= 0 && ci < _views.Count && ci != index)
                         _views[ci].SetTint(green);
                 }
             }
+            else
+            {
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.SelectGood);
+            }
 
-            // tint chosen card (green if correct, red or purple if wrong+cursed)
             bool cursed = _currentCards[index].cursed;
             _views[index].SetTint(isCorrect ? green : (cursed ? purple : red));
 
@@ -277,57 +382,41 @@ namespace ClockworkCasino.Cards
 
             _onPickResolved?.Invoke(index, isCorrect);
         }
-        
+
         public void RevealCorrectOnTimeout()
         {
-            var red = new Color(0.95f, 0.6f, 0.6f);
+            var green  = new Color(0.6f, 0.95f, 0.6f);
             foreach (var v in _views) v.SetInteractable(false);
             foreach (var ci in _finalCorrect)
             {
                 if (ci >= 0 && ci < _views.Count)
-                    _views[ci].SetTint(red);
+                    _views[ci].SetTint(green);
             }
         }
 
         public void BindPickHandlers(Action onPickBegan, Action<int, bool> onPickResolved)
         {
-            _onPickBegan = onPickBegan;
+            _onPickBegan    = onPickBegan;
             _onPickResolved = onPickResolved;
 
             for (int i = 0; i < _views.Count; i++)
             {
                 int idx = i;
                 bool isCorrect = _finalCorrect.Contains(idx);
+                var cd = _currentCards[idx];
+                var mode = (_modePerCard != null && idx < _modePerCard.Length) ? _modePerCard[idx] : CurseVisualMode.None;
 
                 _views[i].Bind(
                     idx,
-                    _currentCards[idx],
+                    cd,
                     isCorrect,
+                    mode,
                     (clickedIndex, correct) => OnCardClicked(clickedIndex, correct)
                 );
             }
         }
 
-
-        Vector2 WorldToLocalIn(RectTransform target, Vector3 worldPos)
-        {
-            var canvas = target.GetComponentInParent<Canvas>();
-            var cam = (canvas && canvas.renderMode != RenderMode.ScreenSpaceOverlay) ? canvas.worldCamera : null;
-            RectTransformUtility.ScreenPointToLocalPointInRectangle(
-                target,
-                RectTransformUtility.WorldToScreenPoint(cam, worldPos),
-                cam,
-                out var local);
-            return local;
-        }
-
-        Vector2 CenterOfRectWorld(RectTransform rt)
-        {
-            var corners = new Vector3[4];
-            rt.GetWorldCorners(corners);
-            return (corners[0] + corners[2]) * 0.5f;
-        }
-        
+        // ===== Helpers =====
         Camera CanvasCamOf(RectTransform any)
         {
             var canvas = any.GetComponentInParent<Canvas>();
@@ -350,6 +439,5 @@ namespace ClockworkCasino.Cards
             var c = new Vector3[4]; rt.GetWorldCorners(c);
             return (c[0] + c[2]) * 0.5f;
         }
-
     }
 }

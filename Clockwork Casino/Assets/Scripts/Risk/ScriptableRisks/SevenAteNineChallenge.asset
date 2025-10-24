@@ -12,6 +12,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b91d9f3141484d04a8b7859cfefea72a, type: 3}
   m_Name: SevenAteNineChallenge
   m_EditorClassIdentifier: ClockworkCasino::ClockworkCasino.Risk.SevenAteNineChallenge
-  Title: Which One Ate 9?
-  CardCount: 5
+  Title: Who ate 9?
+  CardCount: 6
   TimeSeconds: 6

@@ -9,9 +9,8 @@ namespace ClockworkCasino.Rules
         public RuleType Type;
         public string DisplayText;
 
-        // Optional parameters (used by some rules)
-        public Suit AvoidSuit;     // AvoidSuit
-        public ColorFilter Color;  // PickRed / PickBlack
+        public Suit AvoidSuit;
+        public ColorFilter Color;
 
         // Cursing policy for this round
         public CurseMode CurseMode = CurseMode.None;

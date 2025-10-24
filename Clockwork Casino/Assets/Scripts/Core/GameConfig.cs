@@ -10,6 +10,14 @@ namespace ClockworkCasino.Core
 
         [Header("Round Flow")]
         [Range(0.25f, 5f)] public float rulePreviewSeconds = 3.0f;
+        [Range(0.1f, 3f)]  public float buyInPreviewSeconds = 0.75f;
+
+        [Header("Economy")]
+        [Range(1f, 3f)] public float winPayoutMultiplier = 2f;
+
+        [Header("Auto Borrow")]
+        public bool autoBorrowEnabled = false;
+        public bool allowOverflowBorrow = true;
 
         [Header("Dealing / Flip")]
         [Range(0f, 2f)] public float dealStaggerPerCard = 0.1f;    // time between cards leaving the fan
@@ -19,11 +27,11 @@ namespace ClockworkCasino.Core
         [Header("Selection Feedback")]
         [Range(0.05f, 0.6f)] public float selectRaiseSeconds = 0.12f;
         public float selectRaisePixels = 20f;
-        [Range(0.05f, 2.0f)] public float resultFlashSeconds = 1.0f;
+        [Range(0.05f, 5.0f)] public float resultFlashSeconds = 1.0f;
 
         [Header("Intermissions")]
         [Min(2)] public int intermissionEveryNRounds = 5;
-        [Range(0.5f, 10f)] public float intermissionWindowSeconds = 2.0f;
+        [Range(0.0f, 10f)] public float intermissionWindowSeconds = 2.0f;
 
         [Header("Borrowing")]
         [Min(1)] public int borrowPacketSeconds = 10;

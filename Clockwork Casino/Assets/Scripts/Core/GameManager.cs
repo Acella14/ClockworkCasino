@@ -2,11 +2,14 @@ using System;
 using System.Linq;
 using UnityEngine;
 using System.Collections;
+using ClockworkCasino.Rules;
+using ClockworkCasino.Persistence;
 
 namespace ClockworkCasino.Core
 {
     public enum GameState
     {
+        Ready,
         InterRound,
         Setup,
         RulePreview,
@@ -23,6 +26,7 @@ namespace ClockworkCasino.Core
         [SerializeField] private GameConfig _config;
 
         [SerializeField] private UI.UIHud _hud;
+        [SerializeField] private ClockworkCasino.Audio.SfxPlayer _sfx;
         [SerializeField] private Cards.CardDealer _dealer;
         [SerializeField] private Rules.RuleManager _ruleManager;
 
@@ -36,6 +40,7 @@ namespace ClockworkCasino.Core
         public int CurrentStakeS => _currentStakeS;
 
         // Internals
+        RoundDifficulty _currentDifficulty = RoundDifficulty.Easy;
         float _timerS;
         float _roundTimerS;
         int _scoreS;
@@ -48,7 +53,11 @@ namespace ClockworkCasino.Core
 
         bool _freezeRoundTick;
         bool _freezeRiskTick;
-        
+
+        bool _capGraceArmed;
+        bool _capGraceUsed;
+        bool _autoBorrowOn;
+
 
         Rules.RuleDefinition _currentRule;
         int _plannedCardCount;
@@ -71,10 +80,34 @@ namespace ClockworkCasino.Core
             if (_ruleManager == null) Debug.LogWarning("RuleManager not set yet.");
         }
 
+        public void StartRunFromReady()
+        {
+            if (State != GameState.Ready) return;
+
+            _hud?.ShowMessage(string.Empty);
+
+            int firstStake = GetStakeForRound(1);
+            if (_timerS < firstStake)
+            {
+                _hud?.ShowMessage($"Need {firstStake}s to start. Borrow (Q) first.");
+                return;
+            }
+
+            TransitionTo(GameState.Setup);
+        }
+
         void Start()
         {
             ResetRun();
             _hud?.Bind(ContinueToNextRound, TryCashOut, StartRiskRound);
+            _hud?.BindAutoBorrowToggle(OnAutoBorrowChanged);
+            _autoBorrowOn = _config.autoBorrowEnabled;
+            _hud?.SetAutoBorrowUI(_autoBorrowOn);
+        }
+
+        void OnAutoBorrowChanged(bool on)
+        {
+            _autoBorrowOn = on;
         }
 
         void Update()
@@ -107,9 +140,16 @@ namespace ClockworkCasino.Core
             switch (State)
             {
                 case GameState.InterRound:
-                    _stateTimer += Time.deltaTime;
-                    if (_stateTimer >= _config.intermissionWindowSeconds)
-                        TryAdvanceToSetup();
+                    if (_config.intermissionWindowSeconds > 0f)
+                    {
+                        _stateTimer += Time.deltaTime;
+                        if (_stateTimer >= _config.intermissionWindowSeconds)
+                            TryAdvanceToSetup();
+                    }
+                    else
+                    {
+                        _stateTimer = 0f;
+                    }
                     break;
 
                 case GameState.RulePreview:
@@ -126,101 +166,111 @@ namespace ClockworkCasino.Core
             }
 
             // --- HUD updates ---
-            _hud?.SetGlobalTimeBank(Mathf.CeilToInt(_timerS));
 
             switch (State)
             {
-                case GameState.RoundActive:
-                    _hud?.SetRoundClock(_roundTimerS, _currentStakeS); 
-                    break;
-
-                case GameState.RiskActive:
-                    _hud?.SetRoundClock(_riskTimerS, Mathf.Max(1f, _activeRisk?.TimeSeconds ?? 1f));
-                    break;
-
-                case GameState.RulePreview:
-                    _hud?.ShowRoundFullForPreview(_currentStakeS);
-                    break;
-
-                case GameState.RiskPreview:
-                    _hud?.ShowRoundFullForPreview(Mathf.Max(1f, _activeRisk?.TimeSeconds ?? 1f));
-                    break;
-
-                case GameState.Setup:
-                    break;
-
-                case GameState.Resolve:
-                    _hud?.ShowRoundRing(true);
-                    break;
-
-                default:
-                    _hud?.ShowRoundRing(false);
-                    break;
+                case GameState.RoundActive: _hud?.SetRoundClock(_roundTimerS, _currentStakeS); break;
+                case GameState.RiskActive: _hud?.SetRoundClock(_riskTimerS, Mathf.Max(1f, _activeRisk?.TimeSeconds ?? 1f)); break;
+                case GameState.RulePreview: _hud?.ShowRoundFullForPreview(_currentStakeS); break;
+                case GameState.RiskPreview: _hud?.ShowRoundFullForPreview(Mathf.Max(1f, _activeRisk?.TimeSeconds ?? 1f)); break;
+                case GameState.Resolve: _hud?.ShowRoundRing(true); break;
+                default: _hud?.ShowRoundRing(false); break;
             }
 
+            if (State == GameState.RiskPreview || State == GameState.RiskActive)
+            {
+                _hud?.SetDifficultyRisk();
+            }
+            else
+            {
+                _hud?.SetDifficulty(_currentDifficulty);
+            }
 
-            _hud?.SetDebt(_debtS, (int)(_debtS / (float)_config.secondsPerTomorrow * 100f));
-            _hud?.SetScore(_scoreS);
+            int cap = Mathf.Max(1, _config.secondsPerTomorrow);
+            _hud?.SetDebtMeter(_debtS, cap, _capGraceArmed);
+            _hud?.SetScoreLife(_scoreS, cap);
             _hud?.SetStake(_currentStakeS);
 
             bool inter = State == GameState.InterRound;
-            _hud?.SetCashOutInteractable(inter);
             _hud?.SetContinueInteractable(inter);
-            _hud?.SetRiskInteractable(inter && !_riskTakenThisIntermission);
+            _hud?.SetCashOutInteractable(inter && _debtS == 0);
+            _hud?.SetRiskInteractable(inter && !_riskTakenThisIntermission && _debtS == 0);
         }
 
         IEnumerator CoHandleRoundTimeout()
         {
-            // Ask dealer to reveal correct cards in RED (no raise)
+            _sfx?.Play(ClockworkCasino.Audio.SfxEvent.Timeout);
             _dealer?.RevealCorrectOnTimeout();
-
-            // Small dwell so the player can read it
             float dwell = _config ? _config.resultFlashSeconds : 0.25f;
             yield return new WaitForSeconds(dwell);
 
-            // Apply "wrong" outcome, clear, transition
             _debtS += _currentStakeS;
             _hud?.ShowResult(false, 0, _currentStakeS);
-
             _dealer.OnExternalClear();
+
+            HandlePostRoundGraceCheck();
+            if (State == GameState.Ended) yield break;
 
             if (IsIntermissionRound(RoundIndex))
                 TransitionTo(GameState.InterRound);
             else
-                TransitionTo(GameState.Setup);
+                TryAdvanceToSetup();
         }
 
 
         void ResetRun()
         {
-            _timerS = _config.startTimerSeconds;
+            _timerS = Mathf.Max(0, _config.startTimerSeconds);
             _scoreS = 0;
-            _debtS = 0;
+
+            _debtS = Mathf.Min(_config.startTimerSeconds, _config.secondsPerTomorrow);
+
             RoundIndex = 0;
             _currentStakeS = 0;
             _borrowUsedThisRound = false;
             _temporaryExtraCards = 0;
+            _capGraceArmed = false;
+            _capGraceUsed = false;
 
+            _hud?.SetGlobalTimeBank(Mathf.CeilToInt(_timerS));
             _hud?.ShowMessage("Welcome to the Clockwork Casino.");
-            TransitionTo(GameState.Setup);
+            TransitionTo(GameState.Ready);
         }
 
         void TransitionTo(GameState next)
         {
+            var prev = State;
             _stateTimer = 0f;
             State = next;
 
+            if (State == GameState.RiskPreview) _hud?.SetRiskVignette(true);
+            if (State == GameState.RiskActive) _hud?.StartHeartbeatLoop();
+            if ((prev == GameState.RiskPreview || prev == GameState.RiskActive) &&
+                (State != GameState.RiskPreview && State != GameState.RiskActive))
+            {
+                _hud?.StopHeartbeatLoop();
+                _hud?.SetRiskVignette(false);
+            }
+
             switch (State)
             {
+                case GameState.Ready:
+                    _freezeRoundTick = _freezeRiskTick = false;
+                    _hud?.UnfreezeRoundClock();
+
+                    _hud?.ShowInterRound(false);
+
+                    _riskTakenThisIntermission = false;
+                    break;
+
                 case GameState.InterRound:
+                    _sfx?.Play(ClockworkCasino.Audio.SfxEvent.IntermissionOpen);
                     _freezeRoundTick = _freezeRiskTick = false;
                     _hud?.UnfreezeRoundClock();
 
                     _borrowUsedThisRound = false;
                     _hud?.ShowInterRound(true);
-                    _hud?.SetCashOutInteractable(true);
                     _hud?.SetContinueInteractable(true);
-                    _hud?.SetRiskInteractable(!_riskTakenThisIntermission);
                     break;
 
                 case GameState.Setup:
@@ -237,6 +287,8 @@ namespace ClockworkCasino.Core
                     RoundIndex++;
                     _borrowUsedThisRound = false;
                     _currentStakeS = GetStakeForRound(RoundIndex);
+                    _currentDifficulty = _ruleManager.GetDifficultyForStake(_currentStakeS);
+                    _sfx?.Play(ClockworkCasino.Audio.SfxEvent.NewRound);
                     SetupRound();
                     break;
 
@@ -248,9 +300,7 @@ namespace ClockworkCasino.Core
                 case GameState.RiskPreview:
                     _freezeRoundTick = _freezeRiskTick = false;
                     _hud?.UnfreezeRoundClock();
-                    break;
-
-                case GameState.RoundActive:
+                    _hud?.ShowInterRound(false);
                     break;
 
                 case GameState.RiskActive:
@@ -263,7 +313,6 @@ namespace ClockworkCasino.Core
                     break;
             }
         }
-
 
 
         int GetStakeForRound(int roundIndex)
@@ -283,20 +332,50 @@ namespace ClockworkCasino.Core
         void SetupRound()
         {
             _currentRule = _ruleManager.PickRuleForRound(RoundIndex, _currentStakeS);
-            _hud?.ShowRule(_currentRule.DisplayText);
 
             int baseCount = Mathf.Clamp(_config.startCardCount + (RoundIndex / 3), _config.startCardCount, _config.maxCardCount);
             _plannedCardCount = Mathf.Clamp(baseCount + _temporaryExtraCards, _config.startCardCount, _config.maxCardCount);
             _temporaryExtraCards = 0;
 
-            // spend
+            _dealer.OnExternalClear();
+
+            StartCoroutine(CoBuyInThenDeal());
+        }
+
+        IEnumerator CoBuyInThenDeal()
+        {
+            // 1) Briefly show buy-in & payout before charging
+            int payout = Mathf.Max(0, Mathf.RoundToInt(_currentStakeS * Mathf.Max(1f, _config.winPayoutMultiplier)));
+            _sfx?.Play(ClockworkCasino.Audio.SfxEvent.ShowBuyIn);
+            _hud?.ShowMessage($"Buy-in: {_currentStakeS}s - Win: {payout}s");
+            float t = 0f, dwell = Mathf.Max(0.1f, _config.buyInPreviewSeconds);
+            while (t < dwell) { t += Time.deltaTime; yield return null; }
+
+            // 2) If short, pause here (no intermission UI), try Auto-Borrow (same as manual packets)
+            while (Mathf.CeilToInt(_timerS) < _currentStakeS && State == GameState.Setup)
+            {
+                if (_autoBorrowOn)
+                {
+                    // auto-borrow repeatedly until we can pay OR borrowing is impossible
+                    if (!AttemptBorrow(silent:false, ignoreOnce:true)) break;
+                    else continue;
+                }
+
+                int need = _currentStakeS - Mathf.CeilToInt(_timerS);
+                _hud?.ShowMessage($"<Color=Red>Need {need} more seconds to buy in. Borrow to continue.</Color>");
+                yield return null; // wait one frame; player can press Q to borrow
+            }
+
+            // 3) If still short (blocked by credit/grace), stop here
+            if (Mathf.CeilToInt(_timerS) < _currentStakeS || State != GameState.Setup)
+                yield break;
+
+            // 4) Spend, then deal & proceed to RulePreview/RoundActive
             int oldBank = Mathf.CeilToInt(_timerS);
             _timerS = Mathf.Max(0f, _timerS - _currentStakeS);
             int newBank = Mathf.CeilToInt(_timerS);
 
-            _dealer.OnExternalClear();
-
-            _hud?.AnimateSpendToRoundClock(oldBank, newBank, _currentStakeS, animSeconds: 0.6f, onDone: () =>
+            _hud?.AnimateSpendWithChips(oldBank, newBank, _currentStakeS, onDone: () =>
             {
                 _dealer.BeginPreviewAndDeal(
                     _plannedCardCount,
@@ -307,7 +386,6 @@ namespace ClockworkCasino.Core
                     _config.fanRadius,
                     onFlipComplete: () =>
                     {
-                        // bind single-time pick handlers
                         _dealer.BindPickHandlers(
                             onPickBegan: () =>
                             {
@@ -320,26 +398,99 @@ namespace ClockworkCasino.Core
 
                         _roundTimerS = _currentStakeS;
                         TransitionTo(GameState.RoundActive);
-                    }
+                    },
+                    forcedCards: null,
+                    computeCorrectness: null,
+                    onRulePreviewBegin: () => _hud?.ShowRule(_currentRule.DisplayText),
+                    onRulePreviewEnd:   () => _hud?.ShowRule(string.Empty)
                 );
 
                 TransitionTo(GameState.RulePreview);
             });
         }
 
+        bool AttemptBorrow(bool silent, bool ignoreOnce)
+        {
+            if (State == GameState.Ended) return false;
+
+            bool inRound = (State == GameState.RoundActive);
+            if (!ignoreOnce && _config.borrowOncePerRound && _borrowUsedThisRound)
+            {
+                if (!silent) _hud?.ShowMessage("You’ve already borrowed this round.");
+                return false;
+            }
+
+            int packet = Mathf.Max(1, _config.borrowPacketSeconds);
+            int cap    = Mathf.Max(1, _config.secondsPerTomorrow);
+            int projected = _debtS + packet;
+
+            // Normal borrow under cap
+            if (projected <= cap)
+            {
+                _timerS += packet;
+                _debtS  += packet;
+                _hud?.SetGlobalTimeBank(Mathf.CeilToInt(_timerS));
+
+                if (_config.borrowSpikeExtraCards > 0)
+                    _temporaryExtraCards = Mathf.Clamp(_temporaryExtraCards + _config.borrowSpikeExtraCards, 0, 3);
+
+                if (inRound && _config.borrowOncePerRound) _borrowUsedThisRound = true;
+                if (!silent) _hud?.ShowBorrowed(packet, cap - _debtS);
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.Borrow);
+
+                MaybeArmCapGrace();
+                return true;
+            }
+
+            // Overflow into Sudden Death if allowed and grace not used yet
+            if (_config.allowOverflowBorrow && !_capGraceUsed)
+            {
+                _timerS += packet;
+                _debtS  += packet;
+                _hud?.SetGlobalTimeBank(Mathf.CeilToInt(_timerS));
+
+                if (_config.borrowSpikeExtraCards > 0)
+                    _temporaryExtraCards = Mathf.Clamp(_temporaryExtraCards + _config.borrowSpikeExtraCards, 0, 3);
+
+                if (inRound && _config.borrowOncePerRound) _borrowUsedThisRound = true;
+
+                _capGraceArmed = true;
+                _hud?.SetSuddenDeathWarning(true);
+                if (!silent) _hud?.ShowMessage($"Borrowed +{packet}s (OVER LIMIT). SUDDEN DEATH — win or die.");
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.BorrowOverflow);
+
+                return true;
+            }
+
+            // Blocked
+            if (!silent)
+            {
+                int pct = Mathf.Clamp(Mathf.RoundToInt((_debtS / (float)cap) * 100f), 0, 100);
+                _hud?.ShowMessage($"No credit left (Debt {pct}%).");
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.BorrowDenied);
+            }
+            return false;
+        }
+
+
 
         public void StartRiskRound()
         {
             if (State != GameState.InterRound)
             {
-                _hud?.ShowMessage("Risk is only available between rounds.");
+                return;
+            }
+            if (_debtS > 0)
+            {
+                _hud?.ShowMessage("Risk locked while in debt. Clear your debt first.");
                 return;
             }
             if (_riskChallenges == null || _riskChallenges.Length == 0)
             {
-                _hud?.ShowMessage("No risk challenges configured.");
                 return;
             }
+
+            _sfx?.Play(ClockworkCasino.Audio.SfxEvent.RiskStart);
 
             _riskTakenThisIntermission = true;
             _hud?.SetRiskInteractable(false);
@@ -373,7 +524,7 @@ namespace ClockworkCasino.Core
                         {
                             _hud?.FreezeRoundClock();
                             if (State == GameState.RoundActive) _freezeRoundTick = true;
-                            if (State == GameState.RiskActive)  _freezeRiskTick  = true;
+                            if (State == GameState.RiskActive) _freezeRiskTick = true;
                         },
                         onPickResolved: OnRiskCardResolved
                     );
@@ -399,14 +550,6 @@ namespace ClockworkCasino.Core
 
         void TryAdvanceToSetup()
         {
-            // Check we have enough time for the next stake
-            int nextStake = GetStakeForRound(RoundIndex + 1);
-            if (_timerS < nextStake)
-            {
-                _hud?.ShowMessage($"Not enough time to continue (need {nextStake}s). Borrow or cash out.");
-                return;
-            }
-
             TransitionTo(GameState.Setup);
         }
 
@@ -418,7 +561,8 @@ namespace ClockworkCasino.Core
             // apply outcome
             if (isCorrect)
             {
-                int winnings = _currentStakeS;
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.RoundWin);
+                int winnings = Mathf.Max(0, Mathf.RoundToInt(_currentStakeS * Mathf.Max(1f, _config.winPayoutMultiplier)));
                 int pay = Mathf.Min(winnings, _debtS);
                 _debtS -= pay;
                 int surplus = winnings - pay;
@@ -427,16 +571,20 @@ namespace ClockworkCasino.Core
             }
             else
             {
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.RoundLose);
                 _debtS += _currentStakeS;
                 _hud?.ShowResult(false, 0, _currentStakeS);
             }
 
             _dealer.OnExternalClear();
 
+            HandlePostRoundGraceCheck();
+            if (State == GameState.Ended) return;
+
             if (IsIntermissionRound(RoundIndex))
                 TransitionTo(GameState.InterRound);
             else
-                TransitionTo(GameState.Setup);
+                TryAdvanceToSetup();
         }
 
         void OnRiskCardResolved(int indexChosen, bool isCorrect)
@@ -445,6 +593,7 @@ namespace ClockworkCasino.Core
 
             if (isCorrect)
             {
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.RiskSuccess);
                 _scoreS = Mathf.Max(0, _scoreS * 2);
                 _hud?.ShowMessage($"RISK WON! Score doubled to {_scoreS}.");
                 _dealer.OnExternalClear();
@@ -452,6 +601,7 @@ namespace ClockworkCasino.Core
             }
             else
             {
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.RiskFail);
                 EndRun(busted: true);
             }
         }
@@ -484,61 +634,82 @@ namespace ClockworkCasino.Core
             if (IsIntermissionRound(RoundIndex))
                 TransitionTo(GameState.InterRound);
             else
-                TransitionTo(GameState.Setup);
+                TryAdvanceToSetup();
         }
 
 
         void EndRun(bool busted)
         {
+            _hud?.StopHeartbeatLoop();
+            _hud?.SetRiskVignette(false);
+            _dealer?.OnExternalClear();
+
             State = GameState.Ended;
-            _hud?.ShowEndScreen(busted, _scoreS, _debtS);
+            _hud?.ShowEndScreen(busted, _scoreS, _debtS, _config.secondsPerTomorrow);
+
+            if (busted)
+            {
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.EndBusted);
+                PlayerProgress.OnDeath();
+            }
+            else
+            {
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.EndClean);
+                PlayerProgress.AddCashoutGain(_scoreS);
+            }
         }
 
         // ========= Borrow / Cash Out public API (called by UI) =========
 
         public void TryBorrow()
         {
-            if (State == GameState.Ended)
-                return;
-
-            if (_config.borrowOncePerRound && _borrowUsedThisRound)
-            {
-                _hud?.ShowMessage("You’ve already borrowed this round.");
-                return;
-            }
-
-            int packet = _config.borrowPacketSeconds;
-            int cap = Mathf.Max(1, _config.secondsPerTomorrow);
-            int projectedDebt = _debtS + packet;
-
-            // allow only if Tomorrow% < 100% (projected debt stays ≤ cap)
-            if (projectedDebt > cap)
-            {
-                int pct = Mathf.RoundToInt((_debtS / (float)cap) * 100f);
-                _hud?.ShowMessage($"No credit left (Tomorrow {pct}%).");
-                return;
-            }
-
-            // Apply borrow
-            _timerS += packet;
-            _debtS += packet;
-
-            if (_config.borrowSpikeExtraCards > 0)
-                _temporaryExtraCards = Mathf.Clamp(_temporaryExtraCards + _config.borrowSpikeExtraCards, 0, 3);
-
-            _borrowUsedThisRound = _config.borrowOncePerRound;
-
-            // HUD feedback (remaining credit = seconds until 100%)
-            _hud?.ShowBorrowed(packet, cap - _debtS);
+            // In Setup/InterRound/Ready allow multiple packets (ignore once-per-round)
+            bool ignoreOnce = (State != GameState.RoundActive);
+            AttemptBorrow(silent:false, ignoreOnce:ignoreOnce);
         }
 
 
         public void TryCashOut()
         {
             if (State != GameState.InterRound) return;
+            if (_debtS > 0)
+            {
+                _hud?.ShowMessage("You can only cash out when your debt is cleared.");
+                return;
+            }
             EndRun(busted: false);
         }
         
+        void MaybeArmCapGrace()
+        {
+            int cap = Mathf.Max(1, _config.secondsPerTomorrow);
+            if (_debtS >= cap)
+            {
+                if (_capGraceUsed) { EndRun(busted: true); }
+                else if (!_capGraceArmed)
+                {
+                    _capGraceArmed = true;
+                    _hud?.SetSuddenDeathWarning(true);
+                    _sfx?.Play(ClockworkCasino.Audio.SfxEvent.SuddenDeathOn);
+                    _hud?.ShowMessage("SUDDEN DEATH — a wrong pick ends the run.");
+                }
+            }
+        }
+
+        void HandlePostRoundGraceCheck()
+        {
+            if (!_capGraceArmed) return;
+            int cap = Mathf.Max(1, _config.secondsPerTomorrow);
+
+            if (_debtS >= cap) EndRun(busted: true);
+            else
+            {
+                _capGraceArmed = false;
+                _capGraceUsed = true;
+                _hud?.SetSuddenDeathWarning(false);
+                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.SuddenDeathClear);
+            }
+        }
         
     }
 }

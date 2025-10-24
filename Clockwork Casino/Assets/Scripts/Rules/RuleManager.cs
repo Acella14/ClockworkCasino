@@ -5,10 +5,15 @@ using ClockworkCasino.Cards;
 
 namespace ClockworkCasino.Rules
 {
+    public enum RoundDifficulty { Easy, Medium, Hard }
     public class RuleManager : MonoBehaviour
     {
         private ClockworkCasino.Core.GameConfig _config;
-        System.Random _rng = new();
+        private readonly System.Random _rng = new();
+
+        [Header("Difficulty thresholds (by stake seconds)")]
+        [SerializeField] private int _easyMaxStake = 4;  // stake <= this => Easy
+        [SerializeField] private int _hardMinStake = 8;  // stake >= this => Hard (else Medium)
 
         void Awake()
         {
@@ -16,44 +21,73 @@ namespace ClockworkCasino.Rules
             _config = gm ? gm.Config() : null;
         }
 
-        // CLEAN variants (no curses)
-        private readonly List<Func<RuleDefinition>> _clean = new()
+        private readonly List<Func<RuleDefinition>> _easyBase = new()
         {
             () => RuleDefinition.Highest(),
             () => RuleDefinition.Lowest(),
-            () => RuleDefinition.SecondHighest(),
-            () => RuleDefinition.SecondLowest(),
             () => RuleDefinition.PickRed(),
             () => RuleDefinition.PickBlack(),
+        };
+
+        private readonly List<Func<RuleDefinition>> _mediumBase = new()
+        {
+            () => RuleDefinition.SecondHighest(),
+            () => RuleDefinition.SecondLowest(),
             () => RuleDefinition.Avoid(Suit.Spades),
             () => RuleDefinition.Avoid(Suit.Hearts),
         };
 
-        // CURSED variants (same rules but with curses active)
-        private readonly List<Func<RuleDefinition>> _cursed = new()
+        private readonly List<Func<RuleDefinition>> _hardBase = new()
         {
-            () => RuleDefinition.Highest(CurseMode.OneOfValids),
-            () => RuleDefinition.Highest(CurseMode.HalfOfValids),
-            () => RuleDefinition.Lowest(CurseMode.OneOfValids),
-            () => RuleDefinition.SecondHighest(CurseMode.OneOfValids),
-            () => RuleDefinition.SecondLowest(CurseMode.HalfOfValids),
-            () => RuleDefinition.PickRed(CurseMode.OneOfValids),
-            () => RuleDefinition.PickBlack(CurseMode.OneOfValids),
-            () => RuleDefinition.Avoid(Suit.Spades, CurseMode.AllValids),
-            () => RuleDefinition.Avoid(Suit.Hearts, CurseMode.OneOfValids),
+            () => RuleDefinition.SecondHighest(),
+            () => RuleDefinition.SecondLowest(),
+            () => RuleDefinition.Avoid(Suit.Spades),
+            () => RuleDefinition.Avoid(Suit.Hearts),
         };
 
         public RuleDefinition PickRuleForRound(int roundIndex, int stakeSeconds)
         {
+            var pool = PoolForStake(stakeSeconds);
+            var rule = PickRandom(pool);
+
             bool allowCursed = _config != null && roundIndex >= _config.minRoundForCurses;
-            if (!allowCursed) return PickRandom(_clean);
+            float prob = Mathf.Clamp01(_config ? _config.cursedRuleWeight : 0f);
 
-            float w = Mathf.Clamp01(_config.cursedRuleWeight);
-            bool pickCursed = _rng.NextDouble() < w;
+            if (allowCursed && prob > 0f)
+            {
+                rule.CurseMode = PickCurseModeFor(stakeSeconds);
+                rule.CurseProbability = prob;
+            }
+            else
+            {
+                rule.CurseMode = CurseMode.None;
+                rule.CurseProbability = 0f;
+            }
 
-            var rule = pickCursed ? PickRandom(_cursed) : PickRandom(_clean);
-            Debug.Log($"[RuleManager] round={roundIndex} allowCursed={allowCursed} w={w} pickCursed={pickCursed} -> {rule.Type}/{rule.CurseMode}");
             return rule;
+        }
+
+        private List<Func<RuleDefinition>> PoolForStake(int stake)
+        {
+            if (stake <= _easyMaxStake) return _easyBase;
+            if (stake >= _hardMinStake) return _hardBase;
+            return _mediumBase;
+        }
+
+        private CurseMode PickCurseModeFor(int stake)
+        {
+            if (stake >= _hardMinStake)
+            {
+                double r = _rng.NextDouble();
+                if (r < 0.10) return CurseMode.AllValids;
+                if (r < 0.70) return CurseMode.HalfOfValids;
+                return CurseMode.OneOfValids;
+            }
+            if (stake > _easyMaxStake)
+            {
+                return _rng.NextDouble() < 0.25 ? CurseMode.HalfOfValids : CurseMode.OneOfValids;
+            }
+            return CurseMode.OneOfValids;
         }
 
         private RuleDefinition PickRandom(List<Func<RuleDefinition>> pool)
@@ -61,6 +95,13 @@ namespace ClockworkCasino.Rules
             if (pool == null || pool.Count == 0) return RuleDefinition.Highest();
             int i = _rng.Next(0, pool.Count);
             return pool[i]();
+        }
+
+        public RoundDifficulty GetDifficultyForStake(int stakeSeconds)
+        {
+            if (stakeSeconds <= _easyMaxStake) return RoundDifficulty.Easy;
+            if (stakeSeconds >= _hardMinStake) return RoundDifficulty.Hard;
+            return RoundDifficulty.Medium;
         }
     }
 }

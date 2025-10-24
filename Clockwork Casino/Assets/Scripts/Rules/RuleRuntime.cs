@@ -335,12 +335,10 @@ namespace ClockworkCasino.Rules
             }
         }
 
-
-
-
         //Invalid round protection
         public static HashSet<int> ComputeInitialValids(CardData[] cards, RuleDefinition rule)
             => GetInitialValids(cards, rule);
+
 
         // Mutates the given hand just enough so that at least one initial valid exists for the rule.
         public static void EnsureAtLeastOneValid(CardData[] cards, RuleDefinition rule, System.Random rng)
@@ -351,50 +349,50 @@ namespace ClockworkCasino.Rules
             switch (rule.Type)
             {
                 case RuleType.AvoidSuit:
-                {
-                    // If all cards are the avoided suit, flip ONE to a non-avoided suit.
-                    int i = rng.Next(0, cards.Length);
-                    if (cards[i].suit == rule.AvoidSuit)
                     {
-                        // pick any of the other three suits
-                        Suit[] all = { Suit.Clubs, Suit.Diamonds, Suit.Hearts, Suit.Spades };
-                        var options = new System.Collections.Generic.List<Suit>();
-                        foreach (var s in all) if (s != rule.AvoidSuit) options.Add(s);
-                        cards[i].suit = options[rng.Next(0, options.Count)];
+                        // If all cards are the avoided suit, flip ONE to a non-avoided suit.
+                        int i = rng.Next(0, cards.Length);
+                        if (cards[i].suit == rule.AvoidSuit)
+                        {
+                            // pick any of the other three suits
+                            Suit[] all = { Suit.Clubs, Suit.Diamonds, Suit.Hearts, Suit.Spades };
+                            var options = new System.Collections.Generic.List<Suit>();
+                            foreach (var s in all) if (s != rule.AvoidSuit) options.Add(s);
+                            cards[i].suit = options[rng.Next(0, options.Count)];
+                        }
+                        break;
                     }
-                    break;
-                }
 
                 case RuleType.PickColor:
-                {
-                    // If no cards of the requested color exist, flip ONE card to that color.
-                    bool wantRed = rule.Color == ColorFilter.Red;
-                    int i = rng.Next(0, cards.Length);
-                    if (wantRed)
-                        cards[i].suit = (rng.Next(0, 2) == 0) ? Suit.Hearts : Suit.Diamonds;
-                    else
-                        cards[i].suit = (rng.Next(0, 2) == 0) ? Suit.Clubs  : Suit.Spades;
-                    break;
-                }
+                    {
+                        // If no cards of the requested color exist, flip ONE card to that color.
+                        bool wantRed = rule.Color == ColorFilter.Red;
+                        int i = rng.Next(0, cards.Length);
+                        if (wantRed)
+                            cards[i].suit = (rng.Next(0, 2) == 0) ? Suit.Hearts : Suit.Diamonds;
+                        else
+                            cards[i].suit = (rng.Next(0, 2) == 0) ? Suit.Clubs : Suit.Spades;
+                        break;
+                    }
 
                 case RuleType.SecondHighest:
                 case RuleType.SecondLowest:
-                {
-                    // Ensure at least two distinct values exist.
-                    var seen = new System.Collections.Generic.HashSet<int>();
-                    for (int k = 0; k < cards.Length; k++) seen.Add(cards[k].value);
-
-                    if (seen.Count < 2)
                     {
-                        int idx = rng.Next(0, cards.Length);
-                        int newVal = cards[idx].value;
-                        // Pick any value != current “one-and-only” value
-                        int guard = 0;
-                        do { newVal = rng.Next(2, 15); } while (newVal == cards[idx].value && ++guard < 32);
-                        cards[idx].value = newVal;
+                        // Ensure at least two distinct values exist.
+                        var seen = new System.Collections.Generic.HashSet<int>();
+                        for (int k = 0; k < cards.Length; k++) seen.Add(cards[k].value);
+
+                        if (seen.Count < 2)
+                        {
+                            int idx = rng.Next(0, cards.Length);
+                            int newVal = cards[idx].value;
+                            // Pick any value != current “one-and-only” value
+                            int guard = 0;
+                            do { newVal = rng.Next(2, 15); } while (newVal == cards[idx].value && ++guard < 32);
+                            cards[idx].value = newVal;
+                        }
+                        break;
                     }
-                    break;
-                }
 
                 // Highest / Lowest always have a valid set by definition so nothing to do
                 default: break;
