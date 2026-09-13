@@ -1,9 +1,12 @@
-using System;
-using System.Linq;
-using UnityEngine;
 using System.Collections;
-using ClockworkCasino.Rules;
+using System.Collections.Generic;
+using ClockworkCasino.Audio;
+using ClockworkCasino.Cards;
 using ClockworkCasino.Persistence;
+using ClockworkCasino.Risk;
+using ClockworkCasino.Rules;
+using ClockworkCasino.UI;
+using UnityEngine;
 
 namespace ClockworkCasino.Core
 {
@@ -14,702 +17,1247 @@ namespace ClockworkCasino.Core
         Setup,
         RulePreview,
         RoundActive,
-        Resolve,
         RiskPreview,
         RiskActive,
         Ended
     }
 
-    public class GameManager : MonoBehaviour
+    public sealed class GameManager : MonoBehaviour
     {
-        [Header("Config & UI Hooks")]
-        [SerializeField] private GameConfig _config;
-
-        [SerializeField] private UI.UIHud _hud;
-        [SerializeField] private ClockworkCasino.Audio.SfxPlayer _sfx;
-        [SerializeField] private Cards.CardDealer _dealer;
-        [SerializeField] private Rules.RuleManager _ruleManager;
-
-        // Public read-onlys
-        public GameConfig Config() => _config;
-        public GameState State { get; private set; }
-        public int RoundIndex { get; private set; } = 0;
-        public float TimerS => _timerS;
-        public int ScoreS => _scoreS;
-        public int DebtS => _debtS;
-        public int CurrentStakeS => _currentStakeS;
-
-        // Internals
-        RoundDifficulty _currentDifficulty = RoundDifficulty.Easy;
-        float _timerS;
-        float _roundTimerS;
-        int _scoreS;
-        int _debtS;
-        int _currentStakeS;
-        bool _borrowUsedThisRound;
-        float _stateTimer;
-        int _temporaryExtraCards;
-        bool _riskTakenThisIntermission;
-
-        bool _freezeRoundTick;
-        bool _freezeRiskTick;
-
-        bool _capGraceArmed;
-        bool _capGraceUsed;
-        bool _autoBorrowOn;
-
-
-        Rules.RuleDefinition _currentRule;
-        int _plannedCardCount;
-
-        // RISK
-        [SerializeField] private ClockworkCasino.Risk.RiskChallenge[] _riskChallenges;
-
-        float _riskTimerS;
-        System.Random _rng = new();
-        ClockworkCasino.Risk.RiskChallenge _activeRisk;
-        ClockworkCasino.Cards.CardData[] _riskHand;
-
-
-
-        void Awake()
+        private enum RiskRoundMode
         {
-            if (_config == null) Debug.LogError("GameConfig not set on GameManager.");
-            if (_hud == null) Debug.LogWarning("UIHud not set yet.");
-            if (_dealer == null) Debug.LogWarning("CardDealer not set yet.");
-            if (_ruleManager == null) Debug.LogWarning("RuleManager not set yet.");
+            None,
+            Optional,
+            Redemption
+        }
+
+        [Header("Dependencies")]
+        [SerializeField]
+        private GameConfig _config;
+
+        [SerializeField]
+        private UIHud _hud;
+
+        [SerializeField]
+        private HudEffects _hudEffects;
+
+        [SerializeField]
+        private SfxPlayer _soundEffects;
+
+        [SerializeField]
+        private CardDealer _cardDealer;
+
+        [SerializeField]
+        private RuleManager _ruleManager;
+
+        [Header("Risk Challenges")]
+        [SerializeField]
+        private RiskChallenge[] _riskChallenges;
+
+        public GameConfig Config => _config;
+
+        public GameState State { get; private set; }
+
+        public int CurrentTableIndex =>
+            _currentTableIndex;
+
+        public int CurrentStakeHours =>
+            _currentStakeHours;
+
+        public int CurrentWinningsHours =>
+            _currentWinningsHours;
+
+        public bool RedemptionAvailable =>
+            _redemptionAvailable;
+
+        public int RedemptionRoundsRemaining =>
+            _redemptionRoundsRemaining;
+
+        private readonly System.Random _random = new();
+
+        private int _currentTableIndex;
+        private int _roundsCompletedAtCurrentTable;
+
+        private int _currentStakeHours;
+        private int _currentWinningsHours;
+
+        private int _redemptionRoundsRemaining;
+        private bool _redemptionAvailable;
+
+        private float _roundTimeRemaining;
+        private float _riskTimeRemaining;
+        private float _lifeRefreshTimer;
+
+        private bool _roundTimerPaused;
+        private bool _riskTimerPaused;
+
+        private bool _roundResolutionInProgress;
+        private bool _riskTakenThisIntermission;
+
+        private RuleDefinition _currentRule;
+
+        private RiskRoundMode _activeRiskMode;
+        private RiskChallenge _activeRiskChallenge;
+        private CardData[] _riskHand;
+
+        private Coroutine _stakePreviewCoroutine;
+        private Coroutine _roundTimeoutCoroutine;
+
+        private void Awake()
+        {
+            bool missingReference = false;
+
+            if (_config == null)
+            {
+                Debug.LogError(
+                    "GameConfig is not assigned.",
+                    this);
+
+                missingReference = true;
+            }
+
+            if (_hud == null)
+            {
+                Debug.LogError(
+                    "UIHud is not assigned.",
+                    this);
+
+                missingReference = true;
+            }
+
+            if (_hudEffects == null)
+            {
+                Debug.LogError(
+                    "HudEffects is not assigned.",
+                    this);
+
+                missingReference = true;
+            }
+
+            if (_cardDealer == null)
+            {
+                Debug.LogError(
+                    "CardDealer is not assigned.",
+                    this);
+
+                missingReference = true;
+            }
+
+            if (_ruleManager == null)
+            {
+                Debug.LogError(
+                    "RuleManager is not assigned.",
+                    this);
+
+                missingReference = true;
+            }
+
+            if (missingReference)
+                enabled = false;
+        }
+
+        private void Start()
+        {
+            _hud.InitializeControls(
+                ContinueToNextTable,
+                LeaveCasino,
+                StartRiskRound);
+
+            bool diedWhileAway =
+                PlayerProgress.ResolveOfflineDeathIfNeeded(
+                    _config.StartingLifeHours);
+
+            ResetRun(diedWhileAway);
+        }
+
+        private void Update()
+        {
+            if (State != GameState.Ended)
+                TickPersistentLifeClock();
+
+            switch (State)
+            {
+                case GameState.RoundActive:
+                    TickStandardRound();
+                    break;
+
+                case GameState.RiskActive:
+                    TickRiskRound();
+                    break;
+            }
+        }
+
+        private void OnDestroy()
+        {
+            _hud?.ClearControlBindings();
+            SaveLifeCheckpoint();
+        }
+
+        private void OnApplicationPause(bool isPaused)
+        {
+            if (isPaused)
+                SaveLifeCheckpoint();
+        }
+
+        private void OnApplicationQuit()
+        {
+            SaveLifeCheckpoint();
         }
 
         public void StartRunFromReady()
         {
-            if (State != GameState.Ready) return;
+            if (State != GameState.Ready)
+                return;
 
-            _hud?.ShowMessage(string.Empty);
-
-            int firstStake = GetStakeForRound(1);
-            if (_timerS < firstStake)
+            if (PlayerProgress.ResolveOfflineDeathIfNeeded(
+                    _config.StartingLifeHours))
             {
-                _hud?.ShowMessage($"Need {firstStake}s to start. Borrow (Q) first.");
+                RefreshHud();
+
+                _hud.SetMessage(
+                    "Your time expired. "
+                    + $"You begin again with "
+                    + $"{_config.StartingLifeHours} hours.");
+
                 return;
             }
+
+            _hud.SetMessage(string.Empty);
+            TransitionTo(GameState.Setup);
+        }
+
+        public void ContinueToNextTable()
+        {
+            if (State != GameState.InterRound
+                || _roundResolutionInProgress)
+            {
+                return;
+            }
+
+            _currentTableIndex =
+                _config.GetNextTableIndex(
+                    _currentTableIndex);
+
+            _roundsCompletedAtCurrentTable = 0;
 
             TransitionTo(GameState.Setup);
         }
 
-        void Start()
+        public void LeaveCasino()
         {
-            ResetRun();
-            _hud?.Bind(ContinueToNextRound, TryCashOut, StartRiskRound);
-            _hud?.BindAutoBorrowToggle(OnAutoBorrowChanged);
-            _autoBorrowOn = _config.autoBorrowEnabled;
-            _hud?.SetAutoBorrowUI(_autoBorrowOn);
-        }
-
-        void OnAutoBorrowChanged(bool on)
-        {
-            _autoBorrowOn = on;
-        }
-
-        void Update()
-        {
-            if (State == GameState.Ended) return;
-
-            // --- Risk round countdown ---
-            if (State == GameState.RiskActive && !_freezeRiskTick)
+            if (State != GameState.InterRound
+                || _roundResolutionInProgress)
             {
-                _riskTimerS -= Time.deltaTime;
-                if (_riskTimerS <= 0f) { EndRun(busted: true); return; }
+                return;
             }
 
-            // --- Normal round countdown ---
-            if (State == GameState.RoundActive && !_freezeRoundTick)
-            {
-                _roundTimerS -= Time.deltaTime;
-                if (_roundTimerS <= 0f)
-                {
-                    _freezeRoundTick = true;
-                    _hud?.FreezeRoundClock();
+            _soundEffects?.Play(SfxEvent.Cashout);
 
-                    StartCoroutine(CoHandleRoundTimeout());
-                    return;
-                }
+            EndRun(
+                died: false,
+                reason: string.Empty);
+        }
+
+        public void StartRiskRound()
+        {
+            if (State != GameState.InterRound
+                || _riskTakenThisIntermission
+                || _roundResolutionInProgress)
+            {
+                return;
             }
 
+            _riskTakenThisIntermission = true;
 
-            // --- State bookkeeping ---
-            switch (State)
+            BeginRiskRound(
+                RiskRoundMode.Optional,
+                _config.RiskRewardHours);
+        }
+
+        public void ResetRun(
+            bool diedWhileAway = false)
+        {
+            StopManagedCoroutines();
+
+            _cardDealer.ClearTable();
+            _hudEffects.ClearTableChips();
+            _hud.HideRoundEconomy();
+            _hudEffects.StopHeartbeat();
+            _hudEffects.SetRiskVignette(false);
+
+            _ruleManager.ResetForNewRun();
+
+            _currentTableIndex = 0;
+            _roundsCompletedAtCurrentTable = 0;
+
+            _currentStakeHours = 0;
+            _currentWinningsHours = 0;
+
+            _redemptionAvailable = true;
+            _redemptionRoundsRemaining = 0;
+
+            _roundTimeRemaining = 0f;
+            _riskTimeRemaining = 0f;
+
+            _roundTimerPaused = false;
+            _riskTimerPaused = false;
+
+            _roundResolutionInProgress = false;
+            _riskTakenThisIntermission = false;
+
+            _currentRule = null;
+
+            _activeRiskMode = RiskRoundMode.None;
+            _activeRiskChallenge = null;
+            _riskHand = null;
+
+            TransitionTo(
+                GameState.Ready,
+                forceTransition: true);
+
+            _hud.SetMessage(
+                diedWhileAway
+                    ? "Your time expired while you were away. "
+                      + $"You begin again with "
+                      + $"{_config.StartingLifeHours} hours."
+                    : "Welcome to the Clockwork Casino.");
+        }
+
+        private void TransitionTo(
+            GameState nextState,
+            bool forceTransition = false)
+        {
+            if (!forceTransition && State == nextState)
+                return;
+
+            GameState previousState = State;
+
+            ExitState(
+                previousState,
+                nextState);
+
+            State = nextState;
+
+            EnterState(nextState);
+            RefreshStatePresentation();
+        }
+
+        private void ExitState(
+            GameState previousState,
+            GameState nextState)
+        {
+            bool wasRiskState =
+                IsRiskState(previousState);
+
+            bool remainsRiskState =
+                IsRiskState(nextState);
+
+            if (wasRiskState && !remainsRiskState)
             {
+                _hudEffects.StopHeartbeat();
+                _hudEffects.SetRiskVignette(false);
+            }
+        }
+
+        private void EnterState(
+            GameState state)
+        {
+            switch (state)
+            {
+                case GameState.Ready:
+                    _hud.UnfreezeRoundClock();
+                    break;
+
                 case GameState.InterRound:
-                    if (_config.intermissionWindowSeconds > 0f)
-                    {
-                        _stateTimer += Time.deltaTime;
-                        if (_stateTimer >= _config.intermissionWindowSeconds)
-                            TryAdvanceToSetup();
-                    }
-                    else
-                    {
-                        _stateTimer = 0f;
-                    }
+                    _currentStakeHours = 0;
+                    _currentWinningsHours = 0;
+
+                    _hud.HideRoundEconomy();
+                    _hudEffects.ClearPotentialWinningsChips();
+
+                    _hud.UnfreezeRoundClock();
+
+                    _soundEffects?.Play(
+                        SfxEvent.IntermissionOpen);
+                    break;
+
+                case GameState.Setup:
+                    _hud.UnfreezeRoundClock();
+                    BeginStandardRoundSetup();
                     break;
 
                 case GameState.RulePreview:
-                    _stateTimer += Time.deltaTime;
+                    _roundTimerPaused = false;
+                    _hud.UnfreezeRoundClock();
                     break;
 
                 case GameState.RoundActive:
-                    _stateTimer += Time.deltaTime;
+                    _roundTimerPaused = false;
+                    _hud.UnfreezeRoundClock();
                     break;
 
                 case GameState.RiskPreview:
-                    _stateTimer += Time.deltaTime;
+                    _riskTimerPaused = false;
+                    _hud.UnfreezeRoundClock();
+                    _hudEffects.SetRiskVignette(true);
+                    break;
+
+                case GameState.RiskActive:
+                    _riskTimerPaused = false;
+                    _hud.UnfreezeRoundClock();
+                    _hudEffects.StartHeartbeat();
+                    break;
+
+                case GameState.Ended:
+                    _roundTimerPaused = true;
+                    _riskTimerPaused = true;
+                    _hud.FreezeRoundClock();
                     break;
             }
-
-            // --- HUD updates ---
-
-            switch (State)
-            {
-                case GameState.RoundActive: _hud?.SetRoundClock(_roundTimerS, _currentStakeS); break;
-                case GameState.RiskActive: _hud?.SetRoundClock(_riskTimerS, Mathf.Max(1f, _activeRisk?.TimeSeconds ?? 1f)); break;
-                case GameState.RulePreview: _hud?.ShowRoundFullForPreview(_currentStakeS); break;
-                case GameState.RiskPreview: _hud?.ShowRoundFullForPreview(Mathf.Max(1f, _activeRisk?.TimeSeconds ?? 1f)); break;
-                case GameState.Resolve: _hud?.ShowRoundRing(true); break;
-                default: _hud?.ShowRoundRing(false); break;
-            }
-
-            if (State == GameState.RiskPreview || State == GameState.RiskActive)
-            {
-                _hud?.SetDifficultyRisk();
-            }
-            else
-            {
-                _hud?.SetDifficulty(_currentDifficulty);
-            }
-
-            int cap = Mathf.Max(1, _config.secondsPerTomorrow);
-            _hud?.SetDebtMeter(_debtS, cap, _capGraceArmed);
-            _hud?.SetScoreLife(_scoreS, cap);
-            _hud?.SetStake(_currentStakeS);
-
-            bool inter = State == GameState.InterRound;
-            _hud?.SetContinueInteractable(inter);
-            _hud?.SetCashOutInteractable(inter && _debtS == 0);
-            _hud?.SetRiskInteractable(inter && !_riskTakenThisIntermission && _debtS == 0);
         }
 
-        IEnumerator CoHandleRoundTimeout()
+        private void RefreshStatePresentation()
         {
-            _sfx?.Play(ClockworkCasino.Audio.SfxEvent.Timeout);
-            _dealer?.RevealCorrectOnTimeout();
-            float dwell = _config ? _config.resultFlashSeconds : 0.25f;
-            yield return new WaitForSeconds(dwell);
+            RefreshHud();
 
-            _debtS += _currentStakeS;
-            _hud?.ShowResult(false, 0, _currentStakeS);
-            _dealer.OnExternalClear();
+            if (State == GameState.Ended)
+                return;
 
-            HandlePostRoundGraceCheck();
-            if (State == GameState.Ended) yield break;
+            bool isIntermission =
+                State == GameState.InterRound;
 
-            if (IsIntermissionRound(RoundIndex))
-                TransitionTo(GameState.InterRound);
-            else
-                TryAdvanceToSetup();
-        }
-
-
-        void ResetRun()
-        {
-            _timerS = Mathf.Max(0, _config.startTimerSeconds);
-            _scoreS = 0;
-
-            _debtS = Mathf.Min(_config.startTimerSeconds, _config.secondsPerTomorrow);
-
-            RoundIndex = 0;
-            _currentStakeS = 0;
-            _borrowUsedThisRound = false;
-            _temporaryExtraCards = 0;
-            _capGraceArmed = false;
-            _capGraceUsed = false;
-
-            _hud?.SetGlobalTimeBank(Mathf.CeilToInt(_timerS));
-            _hud?.ShowMessage("Welcome to the Clockwork Casino.");
-            TransitionTo(GameState.Ready);
-        }
-
-        void TransitionTo(GameState next)
-        {
-            var prev = State;
-            _stateTimer = 0f;
-            State = next;
-
-            if (State == GameState.RiskPreview) _hud?.SetRiskVignette(true);
-            if (State == GameState.RiskActive) _hud?.StartHeartbeatLoop();
-            if ((prev == GameState.RiskPreview || prev == GameState.RiskActive) &&
-                (State != GameState.RiskPreview && State != GameState.RiskActive))
-            {
-                _hud?.StopHeartbeatLoop();
-                _hud?.SetRiskVignette(false);
-            }
+            _hud.SetIntermissionVisible(isIntermission);
+            RefreshIntermissionActions();
 
             switch (State)
             {
                 case GameState.Ready:
-                    _freezeRoundTick = _freezeRiskTick = false;
-                    _hud?.UnfreezeRoundClock();
-
-                    _hud?.ShowInterRound(false);
-
-                    _riskTakenThisIntermission = false;
-                    break;
-
-                case GameState.InterRound:
-                    _sfx?.Play(ClockworkCasino.Audio.SfxEvent.IntermissionOpen);
-                    _freezeRoundTick = _freezeRiskTick = false;
-                    _hud?.UnfreezeRoundClock();
-
-                    _borrowUsedThisRound = false;
-                    _hud?.ShowInterRound(true);
-                    _hud?.SetContinueInteractable(true);
-                    break;
-
                 case GameState.Setup:
-                    _freezeRoundTick = _freezeRiskTick = false;
-                    _hud?.UnfreezeRoundClock();
-
-                    _hud?.ShowInterRound(false);
-                    _hud?.SetCashOutInteractable(false);
-                    _hud?.SetContinueInteractable(false);
-                    _hud?.SetRiskInteractable(false);
-
-                    _riskTakenThisIntermission = false;
-
-                    RoundIndex++;
-                    _borrowUsedThisRound = false;
-                    _currentStakeS = GetStakeForRound(RoundIndex);
-                    _currentDifficulty = _ruleManager.GetDifficultyForStake(_currentStakeS);
-                    _sfx?.Play(ClockworkCasino.Audio.SfxEvent.NewRound);
-                    SetupRound();
+                case GameState.InterRound:
+                    _hud.ShowRoundClock(false);
                     break;
 
                 case GameState.RulePreview:
-                    _freezeRoundTick = _freezeRiskTick = false;
-                    _hud?.UnfreezeRoundClock();
-                    break;
-
                 case GameState.RiskPreview:
-                    _freezeRoundTick = _freezeRiskTick = false;
-                    _hud?.UnfreezeRoundClock();
-                    _hud?.ShowInterRound(false);
+                    _hud.ShowRoundClockFull();
                     break;
 
+                case GameState.RoundActive:
                 case GameState.RiskActive:
-                    break;
-
-                case GameState.Resolve:
-                    break;
-
-                case GameState.Ended:
+                    _hud.ShowRoundClock(true);
                     break;
             }
         }
 
-
-        int GetStakeForRound(int roundIndex)
+        private void RefreshHud()
         {
-            foreach (var band in _config.stakeBands)
-                if (band.Matches(roundIndex))
-                    return band.StakeSeconds;
-            return _config.stakeBands.Last().StakeSeconds;
-        }
+            int remainingHours =
+                PlayerProgress.GetRemainingHours(
+                    _config.StartingLifeHours);
 
-        bool IsIntermissionRound(int roundIndex)
-        {
-            int n = Mathf.Max(2, _config.intermissionEveryNRounds);
-            return (roundIndex % n) == 0;
-        }
+            TableTier table =
+                _config.GetTableTier(
+                    _currentTableIndex);
 
-        void SetupRound()
-        {
-            _currentRule = _ruleManager.PickRuleForRound(RoundIndex, _currentStakeS);
+            _hud.SetTimeBank(remainingHours);
 
-            int baseCount = Mathf.Clamp(_config.startCardCount + (RoundIndex / 3), _config.startCardCount, _config.maxCardCount);
-            _plannedCardCount = Mathf.Clamp(baseCount + _temporaryExtraCards, _config.startCardCount, _config.maxCardCount);
-            _temporaryExtraCards = 0;
-
-            _dealer.OnExternalClear();
-
-            StartCoroutine(CoBuyInThenDeal());
-        }
-
-        IEnumerator CoBuyInThenDeal()
-        {
-            // 1) Briefly show buy-in & payout before charging
-            int payout = Mathf.Max(0, Mathf.RoundToInt(_currentStakeS * Mathf.Max(1f, _config.winPayoutMultiplier)));
-            _sfx?.Play(ClockworkCasino.Audio.SfxEvent.ShowBuyIn);
-            _hud?.ShowMessage($"Buy-in: {_currentStakeS}s - Win: {payout}s");
-            float t = 0f, dwell = Mathf.Max(0.1f, _config.buyInPreviewSeconds);
-            while (t < dwell) { t += Time.deltaTime; yield return null; }
-
-            // 2) If short, pause here (no intermission UI), try Auto-Borrow (same as manual packets)
-            while (Mathf.CeilToInt(_timerS) < _currentStakeS && State == GameState.Setup)
+            string difficultyText = State switch
             {
-                if (_autoBorrowOn)
-                {
-                    // auto-borrow repeatedly until we can pay OR borrowing is impossible
-                    if (!AttemptBorrow(silent:false, ignoreOnce:true)) break;
-                    else continue;
-                }
+                GameState.RiskPreview
+                or GameState.RiskActive
+                    when _activeRiskMode
+                         == RiskRoundMode.Redemption
+                    => "REDEMPTION",
 
-                int need = _currentStakeS - Mathf.CeilToInt(_timerS);
-                _hud?.ShowMessage($"<Color=Red>Need {need} more seconds to buy in. Borrow to continue.</Color>");
-                yield return null; // wait one frame; player can press Q to borrow
+                GameState.RiskPreview
+                or GameState.RiskActive
+                    => "RISK",
+
+                _ => table.DisplayName
+            };
+
+            _hud.SetDifficulty(difficultyText);
+        }
+
+        private void RefreshIntermissionActions()
+        {
+            bool canUseIntermission =
+                State == GameState.InterRound
+                && !_roundResolutionInProgress;
+
+            bool canStartRisk =
+                canUseIntermission
+                && !_riskTakenThisIntermission
+                && HasRiskChallenges();
+
+            _hud.SetIntermissionActions(
+                canContinue: canUseIntermission,
+                canLeave: canUseIntermission,
+                canStartRisk: canStartRisk);
+        }
+
+        private void BeginStandardRoundSetup()
+        {
+            TableTier table =
+                _config.GetTableTier(
+                    _currentTableIndex);
+
+            _currentStakeHours = table.StakeHours;
+            _currentWinningsHours = table.WinHours;
+
+            _hud.HideRoundEconomy();
+            _hudEffects.ClearTableChips();
+
+            int remainingHours =
+                PlayerProgress.GetRemainingHours(
+                    _config.StartingLifeHours);
+
+            if (remainingHours <= 0)
+            {
+                EndRun(
+                    died: true,
+                    reason: "You ran out of time.");
+
+                return;
             }
 
-            // 3) If still short (blocked by credit/grace), stop here
-            if (Mathf.CeilToInt(_timerS) < _currentStakeS || State != GameState.Setup)
+            bool committedStake =
+                PlayerProgress.TryCommitHours(
+                    _currentStakeHours,
+                    _config.StartingLifeHours,
+                    requireTimeRemainingAfterCommit: true);
+
+            if (!committedStake)
+            {
+                HandleInsufficientTimeForStake(
+                    table.StakeHours);
+
+                return;
+            }
+
+            _currentRule =
+                _ruleManager.PickRuleForTable(
+                    _currentTableIndex);
+
+            _soundEffects?.Play(SfxEvent.NewRound);
+
+            RefreshHud();
+
+            if (_stakePreviewCoroutine != null)
+                StopCoroutine(_stakePreviewCoroutine);
+
+            _stakePreviewCoroutine = StartCoroutine(
+                StakePreviewRoutine(table));
+        }
+
+        private void HandleInsufficientTimeForStake(
+            int requiredStakeHours)
+        {
+            if (_redemptionAvailable)
+            {
+                int redemptionReward =
+                    _config.GetRedemptionRewardHours(
+                        requiredStakeHours);
+
+                _redemptionAvailable = false;
+                _redemptionRoundsRemaining = 0;
+
+                BeginRiskRound(
+                    RiskRoundMode.Redemption,
+                    redemptionReward);
+
+                return;
+            }
+
+            string cooldownMessage =
+                _redemptionRoundsRemaining > 0
+                    ? $" Redemption would return in "
+                      + $"{_redemptionRoundsRemaining} "
+                      + "more rounds."
+                    : string.Empty;
+
+            EndRun(
+                died: true,
+                reason:
+                    $"You could not cover the "
+                    + $"{requiredStakeHours}h bet."
+                    + cooldownMessage);
+        }
+
+        private IEnumerator StakePreviewRoutine(
+            TableTier table)
+        {
+            _hud.SetMessage(string.Empty);
+
+            if (_config.StakePreviewSeconds > 0f)
+            {
+                yield return new WaitForSeconds(
+                    _config.StakePreviewSeconds);
+            }
+
+            _stakePreviewCoroutine = null;
+
+            if (State != GameState.Setup)
                 yield break;
 
-            // 4) Spend, then deal & proceed to RulePreview/RoundActive
-            int oldBank = Mathf.CeilToInt(_timerS);
-            _timerS = Mathf.Max(0f, _timerS - _currentStakeS);
-            int newBank = Mathf.CeilToInt(_timerS);
-
-            _hud?.AnimateSpendWithChips(oldBank, newBank, _currentStakeS, onDone: () =>
-            {
-                _dealer.BeginPreviewAndDeal(
-                    _plannedCardCount,
-                    _currentRule,
-                    _config.rulePreviewSeconds,
-                    _config.dealStaggerPerCard,
-                    _config.dealTravelSeconds,
-                    _config.fanRadius,
-                    onFlipComplete: () =>
-                    {
-                        _dealer.BindPickHandlers(
-                            onPickBegan: () =>
-                            {
-                                _hud?.FreezeRoundClock();
-                                if (State == GameState.RoundActive) _freezeRoundTick = true;
-                                if (State == GameState.RiskActive)  _freezeRiskTick  = true;
-                            },
-                            onPickResolved: OnCardResolved
-                        );
-
-                        _roundTimerS = _currentStakeS;
-                        TransitionTo(GameState.RoundActive);
-                    },
-                    forcedCards: null,
-                    computeCorrectness: null,
-                    onRulePreviewBegin: () => _hud?.ShowRule(_currentRule.DisplayText),
-                    onRulePreviewEnd:   () => _hud?.ShowRule(string.Empty)
-                );
-
-                TransitionTo(GameState.RulePreview);
-            });
+            _hudEffects.PlaceWagerChips(
+                _currentStakeHours,
+                () => HandleWagerPlacementFinished(table));
         }
 
-        bool AttemptBorrow(bool silent, bool ignoreOnce)
+        private void HandleWagerPlacementFinished(
+            TableTier table)
         {
-            if (State == GameState.Ended) return false;
+            if (State != GameState.Setup)
+                return;
 
-            bool inRound = (State == GameState.RoundActive);
-            if (!ignoreOnce && _config.borrowOncePerRound && _borrowUsedThisRound)
+            _hud.ShowRoundEconomy(
+                _currentStakeHours,
+                _currentWinningsHours);
+
+            _hudEffects.ShowPotentialWinnings(
+                _currentWinningsHours);
+
+            BeginStandardDeal(table);
+        }
+
+        private void BeginStandardDeal(
+            TableTier table)
+        {
+            if (State != GameState.Setup)
+                return;
+
+            _cardDealer.BeginDealSequence(
+                table.CardCount,
+                _currentRule,
+                cardsReady: HandleStandardCardsReady,
+                rulePreviewStarted:
+                    () => _hud.SetRule(
+                        _currentRule.DisplayText),
+                rulePreviewFinished:
+                    () => _hud.SetRule(string.Empty));
+
+            TransitionTo(GameState.RulePreview);
+        }
+
+        private void BeginRiskRound(
+            RiskRoundMode riskMode,
+            int rewardHours)
+        {
+            if (!TryCreateRiskChallenge())
             {
-                if (!silent) _hud?.ShowMessage("You’ve already borrowed this round.");
+                if (riskMode == RiskRoundMode.Redemption)
+                {
+                    EndRun(
+                        died: true,
+                        reason:
+                            "No redemption challenge "
+                            + "was available.");
+                }
+                else
+                {
+                    _hud.SetMessage(
+                        "No risk challenges are configured.");
+
+                    _riskTakenThisIntermission = false;
+                    RefreshIntermissionActions();
+                }
+
+                return;
+            }
+
+            _activeRiskMode = riskMode;
+
+            _currentStakeHours = 0;
+            _currentWinningsHours =
+                Mathf.Max(1, rewardHours);
+
+            _riskTimeRemaining = Mathf.Max(
+                1f,
+                _activeRiskChallenge.TimeSeconds);
+
+            _soundEffects?.Play(SfxEvent.RiskStart);
+
+            _cardDealer.ClearTable();
+            _hudEffects.ClearTableChips();
+
+            _hud.ShowRoundEconomy(
+                wagerHours: 0,
+                winningsHours: _currentWinningsHours);
+
+            _hudEffects.ShowPotentialWinnings(
+                _currentWinningsHours);
+
+            if (riskMode == RiskRoundMode.Redemption)
+            {
+                _hud.SetMessage(
+                    $"REDEMPTION — WIN +"
+                    + $"{_currentWinningsHours}h. "
+                    + "LOSE AND DIE.");
+            }
+
+            var riskDisplayRule = new RuleDefinition
+            {
+                Type = RuleType.Highest,
+                DisplayText = _activeRiskChallenge.Title,
+                CurseMode = CurseMode.None,
+                CurseProbability = 0f
+            };
+
+            TransitionTo(GameState.RiskPreview);
+
+            _cardDealer.BeginDealSequence(
+                _riskHand.Length,
+                riskDisplayRule,
+                cardsReady: HandleRiskCardsReady,
+                forcedCards: _riskHand,
+                correctnessEvaluator:
+                    _activeRiskChallenge.Evaluate,
+                rulePreviewStarted:
+                    () => _hud.SetRule(
+                        _activeRiskChallenge.Title),
+                rulePreviewFinished:
+                    () => _hud.SetRule(string.Empty));
+        }
+
+        private bool TryCreateRiskChallenge()
+        {
+            if (!HasRiskChallenges())
                 return false;
-            }
 
-            int packet = Mathf.Max(1, _config.borrowPacketSeconds);
-            int cap    = Mathf.Max(1, _config.secondsPerTomorrow);
-            int projected = _debtS + packet;
+            List<RiskChallenge> usableChallenges =
+                GetUsableRiskChallenges();
 
-            // Normal borrow under cap
-            if (projected <= cap)
+            Shuffle(
+                usableChallenges,
+                _random);
+
+            foreach (RiskChallenge challenge
+                     in usableChallenges)
             {
-                _timerS += packet;
-                _debtS  += packet;
-                _hud?.SetGlobalTimeBank(Mathf.CeilToInt(_timerS));
+                CardData[] generatedHand =
+                    challenge.GenerateHand(_random);
 
-                if (_config.borrowSpikeExtraCards > 0)
-                    _temporaryExtraCards = Mathf.Clamp(_temporaryExtraCards + _config.borrowSpikeExtraCards, 0, 3);
+                if (generatedHand == null
+                    || generatedHand.Length == 0)
+                {
+                    continue;
+                }
 
-                if (inRound && _config.borrowOncePerRound) _borrowUsedThisRound = true;
-                if (!silent) _hud?.ShowBorrowed(packet, cap - _debtS);
-                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.Borrow);
-
-                MaybeArmCapGrace();
+                _activeRiskChallenge = challenge;
+                _riskHand = generatedHand;
                 return true;
             }
 
-            // Overflow into Sudden Death if allowed and grace not used yet
-            if (_config.allowOverflowBorrow && !_capGraceUsed)
-            {
-                _timerS += packet;
-                _debtS  += packet;
-                _hud?.SetGlobalTimeBank(Mathf.CeilToInt(_timerS));
-
-                if (_config.borrowSpikeExtraCards > 0)
-                    _temporaryExtraCards = Mathf.Clamp(_temporaryExtraCards + _config.borrowSpikeExtraCards, 0, 3);
-
-                if (inRound && _config.borrowOncePerRound) _borrowUsedThisRound = true;
-
-                _capGraceArmed = true;
-                _hud?.SetSuddenDeathWarning(true);
-                if (!silent) _hud?.ShowMessage($"Borrowed +{packet}s (OVER LIMIT). SUDDEN DEATH — win or die.");
-                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.BorrowOverflow);
-
-                return true;
-            }
-
-            // Blocked
-            if (!silent)
-            {
-                int pct = Mathf.Clamp(Mathf.RoundToInt((_debtS / (float)cap) * 100f), 0, 100);
-                _hud?.ShowMessage($"No credit left (Debt {pct}%).");
-                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.BorrowDenied);
-            }
+            _activeRiskChallenge = null;
+            _riskHand = null;
             return false;
         }
 
-
-
-        public void StartRiskRound()
+        private bool HasRiskChallenges()
         {
-            if (State != GameState.InterRound)
+            if (_riskChallenges == null)
+                return false;
+
+            for (int index = 0;
+                 index < _riskChallenges.Length;
+                 index++)
             {
-                return;
-            }
-            if (_debtS > 0)
-            {
-                _hud?.ShowMessage("Risk locked while in debt. Clear your debt first.");
-                return;
-            }
-            if (_riskChallenges == null || _riskChallenges.Length == 0)
-            {
-                return;
+                if (_riskChallenges[index] != null)
+                    return true;
             }
 
-            _sfx?.Play(ClockworkCasino.Audio.SfxEvent.RiskStart);
+            return false;
+        }
 
-            _riskTakenThisIntermission = true;
-            _hud?.SetRiskInteractable(false);
-            _hud?.ShowMessage("Starting RISK round...");
+        private List<RiskChallenge> GetUsableRiskChallenges()
+        {
+            var usableChallenges =
+                new List<RiskChallenge>();
 
-            _hud?.UnfreezeRoundClock();
-            _hud?.KillSpendAnimation();
+            if (_riskChallenges == null)
+                return usableChallenges;
 
-            _dealer.OnExternalClear();
-
-            // Pick a challenge
-            _activeRisk = _riskChallenges[_rng.Next(0, _riskChallenges.Length)];
-            _riskHand = _activeRisk.GenerateHand(_rng);
-            _riskTimerS = Mathf.Max(1f, _activeRisk.TimeSeconds);
-
-            _hud?.ShowRule(_activeRisk.Title);
-
-            // Use dealer with forced hand + custom correctness (no curses)
-            TransitionTo(GameState.RiskPreview);
-            _dealer.BeginPreviewAndDeal(
-                _activeRisk.CardCount,
-                new Rules.RuleDefinition { Type = Rules.RuleType.Highest, DisplayText = _activeRisk.Title, CurseMode = Rules.CurseMode.None },
-                _config.rulePreviewSeconds,
-                _config.dealStaggerPerCard,
-                _config.dealTravelSeconds,
-                _config.fanRadius,
-                onFlipComplete: () =>
+            for (int index = 0;
+                 index < _riskChallenges.Length;
+                 index++)
+            {
+                if (_riskChallenges[index] != null)
                 {
-                    _dealer.BindPickHandlers(
-                        onPickBegan: () =>
-                        {
-                            _hud?.FreezeRoundClock();
-                            if (State == GameState.RoundActive) _freezeRoundTick = true;
-                            if (State == GameState.RiskActive) _freezeRiskTick = true;
-                        },
-                        onPickResolved: OnRiskCardResolved
-                    );
-
-                    TransitionTo(GameState.RiskActive);
-                },
-                forcedCards: _riskHand,
-                computeCorrectness: (hand) => _activeRisk.Evaluate(hand)
-            );
-        }
-
-
-        public void ContinueToNextRound()
-        {
-            if (State != GameState.InterRound)
-            {
-                _hud?.ShowMessage("You can only continue between rounds.");
-                return;
-            }
-
-            TryAdvanceToSetup();
-        }
-
-        void TryAdvanceToSetup()
-        {
-            TransitionTo(GameState.Setup);
-        }
-
-
-        void OnCardResolved(int indexChosen, bool isCorrect)
-        {
-            if (State != GameState.RoundActive) return;
-
-            // apply outcome
-            if (isCorrect)
-            {
-                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.RoundWin);
-                int winnings = Mathf.Max(0, Mathf.RoundToInt(_currentStakeS * Mathf.Max(1f, _config.winPayoutMultiplier)));
-                int pay = Mathf.Min(winnings, _debtS);
-                _debtS -= pay;
-                int surplus = winnings - pay;
-                _scoreS += surplus;
-                _hud?.ShowResult(true, surplus, pay);
-            }
-            else
-            {
-                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.RoundLose);
-                _debtS += _currentStakeS;
-                _hud?.ShowResult(false, 0, _currentStakeS);
-            }
-
-            _dealer.OnExternalClear();
-
-            HandlePostRoundGraceCheck();
-            if (State == GameState.Ended) return;
-
-            if (IsIntermissionRound(RoundIndex))
-                TransitionTo(GameState.InterRound);
-            else
-                TryAdvanceToSetup();
-        }
-
-        void OnRiskCardResolved(int indexChosen, bool isCorrect)
-        {
-            if (State != GameState.RiskActive) return;
-
-            if (isCorrect)
-            {
-                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.RiskSuccess);
-                _scoreS = Mathf.Max(0, _scoreS * 2);
-                _hud?.ShowMessage($"RISK WON! Score doubled to {_scoreS}.");
-                _dealer.OnExternalClear();
-                TransitionTo(GameState.InterRound);
-            }
-            else
-            {
-                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.RiskFail);
-                EndRun(busted: true);
-            }
-        }
-
-        void ResolveRound(bool correct)
-        {
-            if (State != GameState.RoundActive) return;
-
-            // If we got here via timeout, freeze the visual ring so it stops
-            _freezeRoundTick = true;
-            _hud?.FreezeRoundClock();
-
-            if (correct)
-            {
-                int winnings = _currentStakeS;
-                int pay = Mathf.Min(winnings, _debtS);
-                _debtS -= pay;
-                int surplus = winnings - pay;
-                _scoreS += surplus;
-                _hud?.ShowResult(true, surplus, pay);
-            }
-            else
-            {
-                _debtS += _currentStakeS;
-                _hud?.ShowResult(false, 0, _currentStakeS);
-            }
-
-            _dealer.OnExternalClear();
-
-            if (IsIntermissionRound(RoundIndex))
-                TransitionTo(GameState.InterRound);
-            else
-                TryAdvanceToSetup();
-        }
-
-
-        void EndRun(bool busted)
-        {
-            _hud?.StopHeartbeatLoop();
-            _hud?.SetRiskVignette(false);
-            _dealer?.OnExternalClear();
-
-            State = GameState.Ended;
-            _hud?.ShowEndScreen(busted, _scoreS, _debtS, _config.secondsPerTomorrow);
-
-            if (busted)
-            {
-                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.EndBusted);
-                PlayerProgress.OnDeath();
-            }
-            else
-            {
-                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.EndClean);
-                PlayerProgress.AddCashoutGain(_scoreS);
-            }
-        }
-
-        // ========= Borrow / Cash Out public API (called by UI) =========
-
-        public void TryBorrow()
-        {
-            // In Setup/InterRound/Ready allow multiple packets (ignore once-per-round)
-            bool ignoreOnce = (State != GameState.RoundActive);
-            AttemptBorrow(silent:false, ignoreOnce:ignoreOnce);
-        }
-
-
-        public void TryCashOut()
-        {
-            if (State != GameState.InterRound) return;
-            if (_debtS > 0)
-            {
-                _hud?.ShowMessage("You can only cash out when your debt is cleared.");
-                return;
-            }
-            EndRun(busted: false);
-        }
-        
-        void MaybeArmCapGrace()
-        {
-            int cap = Mathf.Max(1, _config.secondsPerTomorrow);
-            if (_debtS >= cap)
-            {
-                if (_capGraceUsed) { EndRun(busted: true); }
-                else if (!_capGraceArmed)
-                {
-                    _capGraceArmed = true;
-                    _hud?.SetSuddenDeathWarning(true);
-                    _sfx?.Play(ClockworkCasino.Audio.SfxEvent.SuddenDeathOn);
-                    _hud?.ShowMessage("SUDDEN DEATH — a wrong pick ends the run.");
+                    usableChallenges.Add(
+                        _riskChallenges[index]);
                 }
             }
+
+            return usableChallenges;
         }
 
-        void HandlePostRoundGraceCheck()
+        private void HandleStandardCardsReady()
         {
-            if (!_capGraceArmed) return;
-            int cap = Mathf.Max(1, _config.secondsPerTomorrow);
+            if (State != GameState.RulePreview)
+                return;
 
-            if (_debtS >= cap) EndRun(busted: true);
+            _cardDealer.BindSelectionHandlers(
+                PauseCurrentDecisionTimer,
+                HandleStandardCardResolved);
+
+            TableTier table =
+                _config.GetTableTier(
+                    _currentTableIndex);
+
+            _roundTimeRemaining =
+                table.DecisionTimeSeconds;
+
+            TransitionTo(GameState.RoundActive);
+        }
+
+        private void HandleRiskCardsReady()
+        {
+            if (State != GameState.RiskPreview)
+                return;
+
+            _cardDealer.BindSelectionHandlers(
+                PauseCurrentDecisionTimer,
+                HandleRiskCardResolved);
+
+            TransitionTo(GameState.RiskActive);
+        }
+
+        private void TickStandardRound()
+        {
+            if (_roundTimerPaused
+                || _roundResolutionInProgress)
+            {
+                return;
+            }
+
+            TableTier table =
+                _config.GetTableTier(
+                    _currentTableIndex);
+
+            _roundTimeRemaining = Mathf.Max(
+                0f,
+                _roundTimeRemaining - Time.deltaTime);
+
+            _hud.SetRoundClock(
+                _roundTimeRemaining,
+                table.DecisionTimeSeconds);
+
+            if (_roundTimeRemaining <= 0f)
+                BeginRoundTimeout();
+        }
+
+        private void TickRiskRound()
+        {
+            if (_riskTimerPaused
+                || _roundResolutionInProgress)
+            {
+                return;
+            }
+
+            _riskTimeRemaining = Mathf.Max(
+                0f,
+                _riskTimeRemaining - Time.deltaTime);
+
+            float totalRiskSeconds =
+                Mathf.Max(
+                    1f,
+                    _activeRiskChallenge != null
+                        ? _activeRiskChallenge.TimeSeconds
+                        : 1f);
+
+            _hud.SetRoundClock(
+                _riskTimeRemaining,
+                totalRiskSeconds);
+
+            if (_riskTimeRemaining > 0f)
+                return;
+
+            string reason =
+                _activeRiskMode == RiskRoundMode.Redemption
+                    ? "Redemption ran out of time."
+                    : "The risk clock reached zero.";
+
+            EndRun(
+                died: true,
+                reason: reason);
+        }
+
+        private void PauseCurrentDecisionTimer()
+        {
+            _hud.FreezeRoundClock();
+
+            if (State == GameState.RoundActive)
+                _roundTimerPaused = true;
+
+            if (State == GameState.RiskActive)
+                _riskTimerPaused = true;
+        }
+
+        private void BeginRoundTimeout()
+        {
+            if (_roundTimeoutCoroutine != null
+                || _roundResolutionInProgress)
+            {
+                return;
+            }
+
+            _roundTimerPaused = true;
+            _hud.FreezeRoundClock();
+
+            _roundTimeoutCoroutine = StartCoroutine(
+                RoundTimeoutRoutine());
+        }
+
+        private IEnumerator RoundTimeoutRoutine()
+        {
+            _soundEffects?.Play(SfxEvent.Timeout);
+            _cardDealer.RevealCorrectCards();
+
+            if (_config.ResultDisplaySeconds > 0f)
+            {
+                yield return new WaitForSeconds(
+                    _config.ResultDisplaySeconds);
+            }
+
+            _roundTimeoutCoroutine = null;
+
+            ResolveStandardRound(wasCorrect: false);
+        }
+
+        private void HandleStandardCardResolved(
+            int selectedIndex,
+            bool wasCorrect)
+        {
+            if (State != GameState.RoundActive)
+                return;
+
+            ResolveStandardRound(wasCorrect);
+        }
+
+        private void ResolveStandardRound(
+            bool wasCorrect)
+        {
+            if (_roundResolutionInProgress)
+                return;
+
+            _roundResolutionInProgress = true;
+            _roundTimerPaused = true;
+
+            _cardDealer.ClearTable();
+            _hud.HideRoundEconomy();
+
+            if (wasCorrect)
+            {
+                _soundEffects?.Play(SfxEvent.RoundWin);
+
+                int returnedHours =
+                    _currentStakeHours
+                    + _currentWinningsHours;
+
+                PlayerProgress.AddHours(
+                    returnedHours,
+                    _config.StartingLifeHours);
+
+                _hud.ShowRoundResult(
+                    wasCorrect: true,
+                    winningsHours:
+                        _currentWinningsHours);
+
+                _hudEffects.ResolveWagerWin(
+                    FinishStandardRoundResolution);
+            }
             else
             {
-                _capGraceArmed = false;
-                _capGraceUsed = true;
-                _hud?.SetSuddenDeathWarning(false);
-                _sfx?.Play(ClockworkCasino.Audio.SfxEvent.SuddenDeathClear);
+                _soundEffects?.Play(SfxEvent.RoundLose);
+
+                _hud.ShowRoundResult(
+                    wasCorrect: false,
+                    winningsHours: 0);
+
+                _hudEffects.ResolveWagerLoss(
+                    FinishStandardRoundResolution);
             }
         }
-        
+
+        private void FinishStandardRoundResolution()
+        {
+            _currentStakeHours = 0;
+            _currentWinningsHours = 0;
+            _roundResolutionInProgress = false;
+
+            RefreshHud();
+
+            if (PlayerProgress.HasExpired(
+                    _config.StartingLifeHours))
+            {
+                EndRun(
+                    died: true,
+                    reason: "You ran out of time.");
+
+                return;
+            }
+
+            CompleteStandardRound();
+        }
+
+        private void CompleteStandardRound()
+        {
+            _roundsCompletedAtCurrentTable++;
+
+            AdvanceRedemptionCooldown();
+
+            TableTier table =
+                _config.GetTableTier(
+                    _currentTableIndex);
+
+            if (_roundsCompletedAtCurrentTable
+                >= table.RoundsBeforeIntermission)
+            {
+                _riskTakenThisIntermission = false;
+                TransitionTo(GameState.InterRound);
+            }
+            else
+            {
+                TransitionTo(GameState.Setup);
+            }
+        }
+
+        private void AdvanceRedemptionCooldown()
+        {
+            if (_redemptionAvailable
+                || _redemptionRoundsRemaining <= 0)
+            {
+                return;
+            }
+
+            _redemptionRoundsRemaining--;
+
+            if (_redemptionRoundsRemaining > 0)
+                return;
+
+            _redemptionRoundsRemaining = 0;
+            _redemptionAvailable = true;
+
+            _hud.SetMessage(
+                "REDEMPTION IS AVAILABLE AGAIN.");
+        }
+
+        private void HandleRiskCardResolved(
+            int selectedIndex,
+            bool wasCorrect)
+        {
+            if (State != GameState.RiskActive
+                || _roundResolutionInProgress)
+            {
+                return;
+            }
+
+            _roundResolutionInProgress = true;
+            _riskTimerPaused = true;
+
+            _cardDealer.ClearTable();
+            _hud.HideRoundEconomy();
+
+            if (!wasCorrect)
+            {
+                _soundEffects?.Play(SfxEvent.RiskFail);
+
+                string reason =
+                    _activeRiskMode
+                    == RiskRoundMode.Redemption
+                        ? "Redemption failed."
+                        : "The risk round belonged "
+                          + "to the house.";
+
+                EndRun(
+                    died: true,
+                    reason: reason);
+
+                return;
+            }
+
+            _soundEffects?.Play(SfxEvent.RiskSuccess);
+
+            int rewardHours =
+                _currentWinningsHours;
+
+            PlayerProgress.AddHours(
+                rewardHours,
+                _config.StartingLifeHours);
+
+            RiskRoundMode completedMode =
+                _activeRiskMode;
+
+            if (completedMode
+                == RiskRoundMode.Redemption)
+            {
+                _redemptionAvailable = false;
+
+                _redemptionRoundsRemaining =
+                    _config.RedemptionCooldownRounds;
+
+                _hud.ShowRedemptionSuccess(
+                    rewardHours,
+                    _redemptionRoundsRemaining);
+            }
+            else
+            {
+                _hud.ShowRiskSuccess(rewardHours);
+            }
+
+            _hudEffects.PlayRiskReward(
+                rewardHours,
+                () =>
+                {
+                    _roundResolutionInProgress = false;
+                    _activeRiskMode = RiskRoundMode.None;
+
+                    _currentStakeHours = 0;
+                    _currentWinningsHours = 0;
+
+                    RefreshHud();
+
+                    if (completedMode
+                        == RiskRoundMode.Redemption)
+                    {
+                        TransitionTo(GameState.Setup);
+                    }
+                    else
+                    {
+                        TransitionTo(GameState.InterRound);
+                    }
+                });
+        }
+
+        private void TickPersistentLifeClock()
+        {
+            _lifeRefreshTimer += Time.unscaledDeltaTime;
+
+            if (_lifeRefreshTimer < 1f)
+                return;
+
+            _lifeRefreshTimer = 0f;
+
+            RefreshHud();
+
+            if (!PlayerProgress.HasExpired(
+                    _config.StartingLifeHours))
+            {
+                return;
+            }
+
+            if (State == GameState.Ready)
+            {
+                PlayerProgress.RecordDeath(
+                    _config.StartingLifeHours);
+
+                RefreshHud();
+
+                _hud.SetMessage(
+                    "Your time expired. "
+                    + $"You begin again with "
+                    + $"{_config.StartingLifeHours} hours.");
+
+                return;
+            }
+
+            EndRun(
+                died: true,
+                reason: "Your remaining time expired.");
+        }
+
+        private void EndRun(
+            bool died,
+            string reason)
+        {
+            if (State == GameState.Ended)
+                return;
+
+            StopManagedCoroutines();
+
+            _cardDealer.ClearTable();
+            _hudEffects.ClearTableChips();
+
+            _roundResolutionInProgress = false;
+
+            if (died)
+            {
+                _currentStakeHours = 0;
+                _currentWinningsHours = 0;
+
+                PlayerProgress.RecordDeath(
+                    _config.StartingLifeHours);
+
+                _soundEffects?.Play(
+                    SfxEvent.EndBusted);
+            }
+            else
+            {
+                _soundEffects?.Play(
+                    SfxEvent.EndClean);
+            }
+
+            _activeRiskMode = RiskRoundMode.None;
+
+            TransitionTo(GameState.Ended);
+            RefreshHud();
+
+            int remainingHours =
+                PlayerProgress.GetRemainingHours(
+                    _config.StartingLifeHours);
+
+            _hud.ShowEndScreen(
+                died,
+                remainingHours,
+                reason);
+        }
+
+        private void StopManagedCoroutines()
+        {
+            if (_stakePreviewCoroutine != null)
+            {
+                StopCoroutine(_stakePreviewCoroutine);
+                _stakePreviewCoroutine = null;
+            }
+
+            if (_roundTimeoutCoroutine != null)
+            {
+                StopCoroutine(_roundTimeoutCoroutine);
+                _roundTimeoutCoroutine = null;
+            }
+        }
+
+        private void SaveLifeCheckpoint()
+        {
+            if (_config == null)
+                return;
+
+            PlayerProgress.Checkpoint(
+                _config.StartingLifeHours);
+        }
+
+        private static bool IsRiskState(
+            GameState state)
+        {
+            return state == GameState.RiskPreview
+                   || state == GameState.RiskActive;
+        }
+
+        private static void Shuffle<T>(
+            IList<T> list,
+            System.Random random)
+        {
+            for (int index = list.Count - 1;
+                 index > 0;
+                 index--)
+            {
+                int swapIndex =
+                    random.Next(0, index + 1);
+
+                (list[index], list[swapIndex]) =
+                    (list[swapIndex], list[index]);
+            }
+        }
     }
 }

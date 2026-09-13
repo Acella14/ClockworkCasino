@@ -12,40 +12,44 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: fa63b6d6fadb3c64dbd5ef6f619bb8c0, type: 3}
   m_Name: GameConfig
   m_EditorClassIdentifier: Assembly-CSharp::ClockworkCasino.Core.GameConfig
-  startTimerSeconds: 30
-  rulePreviewSeconds: 3
-  buyInPreviewSeconds: 2
-  winPayoutMultiplier: 2
-  autoBorrowEnabled: 0
-  allowOverflowBorrow: 1
-  dealStaggerPerCard: 0.1
-  dealTravelSeconds: 0.25
-  fanRadius: 40
-  selectRaiseSeconds: 0.15
-  selectRaisePixels: 30
-  resultFlashSeconds: 1.5
-  intermissionEveryNRounds: 4
-  intermissionWindowSeconds: 0
-  borrowPacketSeconds: 10
-  baseCreditSeconds: 10
-  creditGrowthPerScore: 0.5
-  borrowOncePerRound: 0
-  secondsPerTomorrow: 60
-  stakeBands:
-  - RoundMinInclusive: 1
-    RoundMaxInclusive: 3
-    StakeSeconds: 3
-  - RoundMinInclusive: 3
-    RoundMaxInclusive: 5
-    StakeSeconds: 5
-  - RoundMinInclusive: 6
-    RoundMaxInclusive: 10
-    StakeSeconds: 7
-  - RoundMinInclusive: 10
-    RoundMaxInclusive: 99
-    StakeSeconds: 10
-  startCardCount: 3
-  maxCardCount: 6
-  borrowSpikeExtraCards: 1
-  minRoundForCurses: 5
-  cursedRuleWeight: 1
+  _startingLifeHours: 24
+  _rulePreviewSeconds: 2.25
+  _stakePreviewSeconds: 0.5
+  _dealStaggerSeconds: 0.1
+  _dealTravelSeconds: 0.25
+  _previewHalfSpreadWidth: 40
+  _selectionRaiseSeconds: 0.12
+  _selectionRaisePixels: 20
+  _resultDisplaySeconds: 1
+  _tableTiers:
+  - _displayName: "TABLE I \u2014 INVITATION"
+    _roundsBeforeIntermission: 4
+    _stakeHours: 2
+    _winHours: 3
+    _decisionTimeSeconds: 3
+    _cardCount: 3
+    _curseProbability: 0
+  - _displayName: "TABLE II \u2014 THE HOOK"
+    _roundsBeforeIntermission: 4
+    _stakeHours: 3
+    _winHours: 5
+    _decisionTimeSeconds: 5
+    _cardCount: 4
+    _curseProbability: 0.25
+  - _displayName: "TABLE III \u2014 THE TRAP"
+    _roundsBeforeIntermission: 4
+    _stakeHours: 4
+    _winHours: 7
+    _decisionTimeSeconds: 5.5
+    _cardCount: 5
+    _curseProbability: 0.45
+  - _displayName: "TABLE IV \u2014 THE HOUSE"
+    _roundsBeforeIntermission: 4
+    _stakeHours: 5
+    _winHours: 10
+    _decisionTimeSeconds: 6.5
+    _cardCount: 6
+    _curseProbability: 0.65
+  _riskRewardHours: 6
+  _redemptionCooldownRounds: 5
+  _redemptionBonusHours: 1

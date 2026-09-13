@@ -1,107 +1,376 @@
-using UnityEngine;
-using System;
 using System.Collections.Generic;
-using ClockworkCasino.Cards;
+using ClockworkCasino.Core;
+using UnityEngine;
 
 namespace ClockworkCasino.Rules
 {
-    public enum RoundDifficulty { Easy, Medium, Hard }
-    public class RuleManager : MonoBehaviour
+    public sealed class RuleManager : MonoBehaviour
     {
-        private ClockworkCasino.Core.GameConfig _config;
-        private readonly System.Random _rng = new();
-
-        [Header("Difficulty thresholds (by stake seconds)")]
-        [SerializeField] private int _easyMaxStake = 4;  // stake <= this => Easy
-        [SerializeField] private int _hardMinStake = 8;  // stake >= this => Hard (else Medium)
-
-        void Awake()
+        private enum RuleId
         {
-            var gm = FindFirstObjectByType<ClockworkCasino.Core.GameManager>();
-            _config = gm ? gm.Config() : null;
+            Highest,
+            Lowest,
+            MiddleValue,
+            HighestRed,
+            HighestBlack,
+            TwoHighest,
+            TwoLowest,
+
+            SecondHighest,
+            SecondLowest,
+            TwoClosestValues,
+            TwoFarthestValues,
+            PairSum,
+            PairDifference,
+            LowestRed,
+            LowestBlack,
+
+            SameSuitPair,
+            LowestThenHighest,
+            HighestThenLowest,
+
+            ThreeCardSum,
+            PairSumLowFirst,
+            SameSuitPairLowFirst
         }
 
-        private readonly List<Func<RuleDefinition>> _easyBase = new()
+        private static readonly RuleId[] TableZeroRules =
         {
-            () => RuleDefinition.Highest(),
-            () => RuleDefinition.Lowest(),
-            () => RuleDefinition.PickRed(),
-            () => RuleDefinition.PickBlack(),
+            RuleId.Highest,
+            RuleId.Lowest,
+            RuleId.MiddleValue,
+            RuleId.HighestRed,
+            RuleId.HighestBlack,
+            RuleId.TwoHighest,
+            RuleId.TwoLowest
         };
 
-        private readonly List<Func<RuleDefinition>> _mediumBase = new()
+        private static readonly RuleId[] TableOneRules =
         {
-            () => RuleDefinition.SecondHighest(),
-            () => RuleDefinition.SecondLowest(),
-            () => RuleDefinition.Avoid(Suit.Spades),
-            () => RuleDefinition.Avoid(Suit.Hearts),
+            RuleId.SecondHighest,
+            RuleId.SecondLowest,
+            RuleId.TwoClosestValues,
+            RuleId.TwoFarthestValues,
+            RuleId.PairSum,
+            RuleId.PairDifference,
+            RuleId.LowestRed,
+            RuleId.LowestBlack
         };
 
-        private readonly List<Func<RuleDefinition>> _hardBase = new()
+        private static readonly RuleId[] TableTwoRules =
         {
-            () => RuleDefinition.SecondHighest(),
-            () => RuleDefinition.SecondLowest(),
-            () => RuleDefinition.Avoid(Suit.Spades),
-            () => RuleDefinition.Avoid(Suit.Hearts),
+            RuleId.SameSuitPair,
+            RuleId.LowestThenHighest,
+            RuleId.HighestThenLowest,
+            RuleId.TwoClosestValues,
+            RuleId.TwoFarthestValues,
+            RuleId.PairSum,
+            RuleId.PairDifference
         };
 
-        public RuleDefinition PickRuleForRound(int roundIndex, int stakeSeconds)
+        private static readonly RuleId[] FinalTableRules =
         {
-            var pool = PoolForStake(stakeSeconds);
-            var rule = PickRandom(pool);
+            RuleId.SecondHighest,
+            RuleId.SecondLowest,
+            RuleId.TwoClosestValues,
+            RuleId.TwoFarthestValues,
+            RuleId.PairSum,
+            RuleId.PairDifference,
+            RuleId.LowestRed,
+            RuleId.LowestBlack,
 
-            bool allowCursed = _config != null && roundIndex >= _config.minRoundForCurses;
-            float prob = Mathf.Clamp01(_config ? _config.cursedRuleWeight : 0f);
+            RuleId.SameSuitPair,
+            RuleId.LowestThenHighest,
+            RuleId.HighestThenLowest,
 
-            if (allowCursed && prob > 0f)
+            RuleId.ThreeCardSum,
+            RuleId.PairSumLowFirst,
+            RuleId.SameSuitPairLowFirst
+        };
+
+        [SerializeField]
+        private GameConfig _config;
+
+        private readonly System.Random _random = new();
+        private readonly List<RuleId> _shuffleBag = new();
+
+        private int _activeBagTableIndex = -1;
+        private RuleId? _lastRule;
+
+        private void Awake()
+        {
+            if (_config == null)
             {
-                rule.CurseMode = PickCurseModeFor(stakeSeconds);
-                rule.CurseProbability = prob;
+                Debug.LogError(
+                    $"{nameof(RuleManager)} requires a GameConfig.",
+                    this);
             }
-            else
+        }
+
+        public void ResetForNewRun()
+        {
+            _shuffleBag.Clear();
+            _activeBagTableIndex = -1;
+            _lastRule = null;
+        }
+
+        public RuleDefinition PickRuleForTable(
+            int tableIndex)
+        {
+            if (_activeBagTableIndex != tableIndex
+                || _shuffleBag.Count == 0)
             {
-                rule.CurseMode = CurseMode.None;
-                rule.CurseProbability = 0f;
+                RefillShuffleBag(tableIndex);
             }
+
+            RuleId selectedRuleId =
+                DrawNextRuleId();
+
+            RuleDefinition rule =
+                CreateRule(selectedRuleId);
+
+            ApplyTableCursePolicy(
+                rule,
+                tableIndex);
 
             return rule;
         }
 
-        private List<Func<RuleDefinition>> PoolForStake(int stake)
+        private RuleId DrawNextRuleId()
         {
-            if (stake <= _easyMaxStake) return _easyBase;
-            if (stake >= _hardMinStake) return _hardBase;
-            return _mediumBase;
+            int finalIndex =
+                _shuffleBag.Count - 1;
+
+            RuleId selectedRuleId =
+                _shuffleBag[finalIndex];
+
+            _shuffleBag.RemoveAt(finalIndex);
+            _lastRule = selectedRuleId;
+
+            return selectedRuleId;
         }
 
-        private CurseMode PickCurseModeFor(int stake)
+        private void RefillShuffleBag(
+            int tableIndex)
         {
-            if (stake >= _hardMinStake)
+            _shuffleBag.Clear();
+            _activeBagTableIndex = tableIndex;
+
+            AddRules(
+                GetRulesForTable(tableIndex));
+
+            RemoveRulesThatDoNotFitTable(tableIndex);
+
+            if (_shuffleBag.Count == 0)
+                AddRules(TableZeroRules);
+
+            Shuffle(_shuffleBag);
+            PreventBoundaryRepeat();
+        }
+
+        private IEnumerable<RuleId> GetRulesForTable(
+            int tableIndex)
+        {
+            if (tableIndex <= 0)
+                return TableZeroRules;
+
+            if (tableIndex == 1)
+                return TableOneRules;
+
+            if (tableIndex == 2)
+                return TableTwoRules;
+
+            return FinalTableRules;
+        }
+
+        private void RemoveRulesThatDoNotFitTable(
+            int tableIndex)
+        {
+            if (_config == null)
+                return;
+
+            TableTier table =
+                _config.GetTableTier(tableIndex);
+
+            int cardCount =
+                table.CardCount;
+
+            _shuffleBag.RemoveAll(
+                ruleId =>
+                    ruleId == RuleId.ThreeCardSum
+                    && cardCount < 3);
+        }
+
+        private void AddRules(
+            IEnumerable<RuleId> rules)
+        {
+            foreach (RuleId rule in rules)
+                _shuffleBag.Add(rule);
+        }
+
+        private void ApplyTableCursePolicy(
+            RuleDefinition rule,
+            int tableIndex)
+        {
+            if (rule == null || _config == null)
+                return;
+
+            TableTier table =
+                _config.GetTableTier(tableIndex);
+
+            if (table.CurseProbability <= 0f)
             {
-                double r = _rng.NextDouble();
-                if (r < 0.10) return CurseMode.AllValids;
-                if (r < 0.70) return CurseMode.HalfOfValids;
+                rule.CurseMode = CurseMode.None;
+                rule.CurseProbability = 0f;
+                return;
+            }
+
+            rule.CurseMode =
+                PickCurseMode(tableIndex);
+
+            rule.CurseProbability =
+                table.CurseProbability;
+        }
+
+        private CurseMode PickCurseMode(
+            int tableIndex)
+        {
+            if (tableIndex <= 1)
                 return CurseMode.OneOfValids;
-            }
-            if (stake > _easyMaxStake)
+
+            if (tableIndex == 2)
             {
-                return _rng.NextDouble() < 0.25 ? CurseMode.HalfOfValids : CurseMode.OneOfValids;
+                return _random.NextDouble() < 0.8
+                    ? CurseMode.OneOfValids
+                    : CurseMode.HalfOfValids;
             }
+
+            double roll = _random.NextDouble();
+
+            if (roll < 0.15)
+                return CurseMode.AllValids;
+
+            if (roll < 0.60)
+                return CurseMode.HalfOfValids;
+
             return CurseMode.OneOfValids;
         }
 
-        private RuleDefinition PickRandom(List<Func<RuleDefinition>> pool)
+        private RuleDefinition CreateRule(
+            RuleId ruleId)
         {
-            if (pool == null || pool.Count == 0) return RuleDefinition.Highest();
-            int i = _rng.Next(0, pool.Count);
-            return pool[i]();
+            return ruleId switch
+            {
+                RuleId.Highest =>
+                    RuleDefinition.Highest(),
+
+                RuleId.Lowest =>
+                    RuleDefinition.Lowest(),
+
+                RuleId.MiddleValue =>
+                    RuleDefinition.MiddleValue(),
+
+                RuleId.HighestRed =>
+                    RuleDefinition.HighestRed(),
+
+                RuleId.HighestBlack =>
+                    RuleDefinition.HighestBlack(),
+
+                RuleId.TwoHighest =>
+                    RuleDefinition.TwoHighest(),
+
+                RuleId.TwoLowest =>
+                    RuleDefinition.TwoLowest(),
+
+                RuleId.SecondHighest =>
+                    RuleDefinition.SecondHighest(),
+
+                RuleId.SecondLowest =>
+                    RuleDefinition.SecondLowest(),
+
+                RuleId.TwoClosestValues =>
+                    RuleDefinition.TwoClosestValues(),
+
+                RuleId.TwoFarthestValues =>
+                    RuleDefinition.TwoFarthestValues(),
+
+                RuleId.PairSum =>
+                    RuleDefinition.PairSum(),
+
+                RuleId.PairDifference =>
+                    RuleDefinition.PairDifference(),
+
+                RuleId.LowestRed =>
+                    RuleDefinition.LowestRed(),
+
+                RuleId.LowestBlack =>
+                    RuleDefinition.LowestBlack(),
+
+                RuleId.SameSuitPair =>
+                    RuleDefinition.SameSuitPair(),
+
+                RuleId.LowestThenHighest =>
+                    RuleDefinition.LowestThenHighest(),
+
+                RuleId.HighestThenLowest =>
+                    RuleDefinition.HighestThenLowest(),
+
+                RuleId.ThreeCardSum =>
+                    RuleDefinition.ThreeCardSum(),
+
+                RuleId.PairSumLowFirst =>
+                    RuleDefinition.PairSumLowFirst(),
+
+                RuleId.SameSuitPairLowFirst =>
+                    RuleDefinition.SameSuitPairLowFirst(),
+
+                _ =>
+                    RuleDefinition.Highest()
+            };
         }
 
-        public RoundDifficulty GetDifficultyForStake(int stakeSeconds)
+        private void PreventBoundaryRepeat()
         {
-            if (stakeSeconds <= _easyMaxStake) return RoundDifficulty.Easy;
-            if (stakeSeconds >= _hardMinStake) return RoundDifficulty.Hard;
-            return RoundDifficulty.Medium;
+            if (!_lastRule.HasValue
+                || _shuffleBag.Count <= 1
+                || _shuffleBag[_shuffleBag.Count - 1]
+                != _lastRule.Value)
+            {
+                return;
+            }
+
+            int swapIndex =
+                _random.Next(
+                    0,
+                    _shuffleBag.Count - 1);
+
+            int lastIndex =
+                _shuffleBag.Count - 1;
+
+            RuleId temp =
+                _shuffleBag[lastIndex];
+
+            _shuffleBag[lastIndex] =
+                _shuffleBag[swapIndex];
+
+            _shuffleBag[swapIndex] =
+                temp;
+        }
+
+        private void Shuffle<T>(
+            IList<T> list)
+        {
+            for (int index = list.Count - 1;
+                 index > 0;
+                 index--)
+            {
+                int swapIndex =
+                    _random.Next(0, index + 1);
+
+                T temp = list[index];
+                list[index] = list[swapIndex];
+                list[swapIndex] = temp;
+            }
         }
     }
 }

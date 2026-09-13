@@ -1,257 +1,499 @@
 using System;
 using System.Collections;
-using UnityEngine;
-using UnityEngine.UI;
 using TMPro;
+using UnityEngine;
+using UnityEngine.Serialization;
+using UnityEngine.UI;
 
 namespace ClockworkCasino.Cards
 {
-    public enum CurseVisualMode { None, ColorReversedSuit, Stealth }
-
-    public class CardView : MonoBehaviour
+    public enum CurseVisualMode
     {
-        [Header("Core UI refs")]
-        [SerializeField] private Button _button;
-        [SerializeField] private Image _bg;
-        [SerializeField] private GameObject _frontRoot;
-        [SerializeField] private GameObject _backRoot;
+        None,
+        ColorReversedSuit,
+        Stealth
+    }
 
-        [Header("Face elements")]
-        [SerializeField] private TMP_Text _rankTL;
-        [SerializeField] private TMP_Text _rankBR;
-        [SerializeField] float _rankSizeSingle = 64f;
-        [SerializeField] float _rankSizeDouble = 54f;
-        [SerializeField] float _rankTightenForDouble = -4f;
-        [SerializeField] float _rankOffsetDoubleX = 8f;
-        Vector2 _rankTLBasePos, _rankBRBasePos;
-        [SerializeField] private Image _suitCenter;
+    public sealed class CardView : MonoBehaviour
+    {
+        [Header("Core")]
+        [FormerlySerializedAs("_button")]
+        [SerializeField]
+        private Button _button;
 
-        [Header("Suit sprites (normal, enum order: Clubs, Diamonds, Hearts, Spades)")]
-        [SerializeField] private Sprite[] _suitSprites = new Sprite[4];
+        [FormerlySerializedAs("_bg")]
+        [SerializeField]
+        private Image _background;
 
-        [Header("Suit sprites (cursed, color-reversed)")]
-        [SerializeField] private Sprite[] _suitSpritesCursed = new Sprite[4];
+        [FormerlySerializedAs("_frontRoot")]
+        [SerializeField]
+        private GameObject _frontRoot;
 
-        Vector3 _suitBaseScale = Vector3.one;
-        Quaternion _suitBaseRot = Quaternion.identity;
-        Vector2 _suitBasePos = Vector2.zero;
+        [FormerlySerializedAs("_backRoot")]
+        [SerializeField]
+        private GameObject _backRoot;
+
+        [Header("Rank")]
+        [FormerlySerializedAs("_rankTL")]
+        [SerializeField]
+        private TMP_Text _topLeftRank;
+
+        [FormerlySerializedAs("_rankBR")]
+        [SerializeField]
+        private TMP_Text _bottomRightRank;
+
+        [FormerlySerializedAs("_rankSizeSingle")]
+        [SerializeField]
+        private float _singleCharacterRankSize = 64f;
+
+        [FormerlySerializedAs("_rankSizeDouble")]
+        [SerializeField]
+        private float _doubleCharacterRankSize = 54f;
+
+        [FormerlySerializedAs("_rankTightenForDouble")]
+        [SerializeField]
+        private float _doubleCharacterSpacing = -4f;
+
+        [FormerlySerializedAs("_rankOffsetDoubleX")]
+        [SerializeField]
+        private float _doubleCharacterHorizontalOffset = 8f;
+
+        [Header("Suit")]
+        [FormerlySerializedAs("_suitCenter")]
+        [SerializeField]
+        private Image _centerSuit;
+
+        [FormerlySerializedAs("_suitSprites")]
+        [SerializeField]
+        private Sprite[] _normalSuitSprites = new Sprite[4];
+
+        [FormerlySerializedAs("_suitSpritesCursed")]
+        [SerializeField]
+        private Sprite[] _reversedColorSuitSprites =
+            new Sprite[4];
+
+        [Header("Selection State")]
+        [Tooltip(
+            "Optional. Shows 1, 2, 3, etc. for ordered rules.")]
+        [SerializeField]
+        private TMP_Text _selectionOrderText;
 
         [Header("Colors")]
-        [SerializeField] private Color _baseColor = Color.white;
-        [SerializeField] private Color _faceDownColor = Color.white;
-        [SerializeField] private Color _cursedBaseTint = new Color(1.00f, 0.90f, 0.90f);
-        [SerializeField] private Color _rankColorBlack = new Color32(20, 20, 20, 255);
-        [SerializeField] private Color _rankColorRed = new Color32(190, 35, 35, 255);
+        [FormerlySerializedAs("_baseColor")]
+        [SerializeField]
+        private Color _faceUpBackgroundColor =
+            Color.white;
 
-        RectTransform _rt;
-        Vector2 _startAnchoredPos;
+        [FormerlySerializedAs("_faceDownColor")]
+        [SerializeField]
+        private Color _faceDownBackgroundColor =
+            Color.white;
 
-        int _index;
-        bool _isCorrect;
-        CardData _data;
+        [FormerlySerializedAs("_rankColorBlack")]
+        [SerializeField]
+        private Color _blackRankColor =
+            new Color32(20, 20, 20, 255);
 
-        void Awake()
+        [FormerlySerializedAs("_rankColorRed")]
+        [SerializeField]
+        private Color _redRankColor =
+            new Color32(190, 35, 35, 255);
+
+        private RectTransform _rectTransform;
+
+        private Vector2 _topLeftRankBasePosition;
+        private Vector2 _bottomRightRankBasePosition;
+
+        private Vector3 _suitBaseScale =
+            Vector3.one;
+
+        private Quaternion _suitBaseRotation =
+            Quaternion.identity;
+
+        private Vector2 _suitBasePosition;
+
+        private int _cardIndex;
+        private Action<int> _selectionCallback;
+
+        private void Awake()
         {
-            _rt = GetComponent<RectTransform>();
-            if (_rt) _startAnchoredPos = _rt.anchoredPosition;
+            _rectTransform =
+                GetComponent<RectTransform>();
 
-            if (_rankTL) _rankTLBasePos = _rankTL.rectTransform.anchoredPosition;
-            if (_rankBR) _rankBRBasePos = _rankBR.rectTransform.anchoredPosition;
+            CacheBaseTextPositions();
+            CacheBaseSuitTransform();
 
-            if (_suitCenter != null)
+            if (_button != null)
             {
-                var rt = _suitCenter.rectTransform;
-                _suitBaseScale = rt.localScale;
-                _suitBaseRot   = rt.localRotation;
-                _suitBasePos   = rt.anchoredPosition;
+                _button.onClick.AddListener(
+                    HandleButtonClicked);
             }
 
-            ToggleFace(true);
+            ShowFaceDown();
         }
 
-        public void SetTint(Color c) { if (_bg) _bg.color = c; }
-
-        public void Bind(int index, CardData data, bool isCorrect, CurseVisualMode curseMode, Action<int, bool> onClicked)
+        private void OnDestroy()
         {
-            _index = index;
-            _isCorrect = isCorrect;
-            _data = data;
-
-            SetFaceUp(_data, isCorrect, curseMode);
-
-            if (_button)
+            if (_button != null)
             {
-                _button.onClick.RemoveAllListeners();
-                _button.onClick.AddListener(() => onClicked?.Invoke(_index, _isCorrect));
-                _button.interactable = true;
-            }
-        }
-
-        public void SetFaceDown()
-        {
-            ToggleFace(false);
-            if (_button) _button.interactable = false;
-            if (_bg) _bg.color = _faceDownColor;
-        }
-
-        public void SetFaceUp(CardData data, bool? isCorrect = null, CurseVisualMode curseMode = CurseVisualMode.ColorReversedSuit)
-        {
-            _data = data;
-            if (isCorrect.HasValue) _isCorrect = isCorrect.Value;
-
-            ToggleFace(true);
-
-            if (_bg) _bg.color = _baseColor;
-
-            // Rank text
-            string rank = RankString(data.value);
-            if (_rankTL) _rankTL.text = rank;
-            if (_rankBR) _rankBR.text = rank;
-
-            bool redSuit = (data.suit == Suit.Hearts || data.suit == Suit.Diamonds);
-            var rankColor = redSuit ? _rankColorRed : _rankColorBlack;
-            if (_rankTL) _rankTL.color = rankColor;
-            if (_rankBR) _rankBR.color = rankColor;
-
-            ApplyRank(_rankTL, rank, rankColor, true);
-            ApplyRank(_rankBR, rank, rankColor, false);
-
-            if (_suitCenter)
-            {
-                var srt = _suitCenter.rectTransform;
-                srt.localScale    = _suitBaseScale;
-                srt.localRotation = _suitBaseRot;
-                srt.anchoredPosition = _suitBasePos;
-                _suitCenter.color  = Color.white;
-            }
-
-            // Choose sprite & subtlety based on curse mode
-            if (_suitCenter)
-            {
-                int idx = Mathf.Clamp((int)data.suit, 0, 3);
-                Sprite sprite = null;
-
-                if (data.cursed)
-                {
-                    if (curseMode == CurseVisualMode.ColorReversedSuit)
-                    {
-                        if (_suitSpritesCursed != null && _suitSpritesCursed.Length >= 4)
-                            sprite = _suitSpritesCursed[idx];
-                    }
-                    else if (curseMode == CurseVisualMode.Stealth)
-                    {
-                        if (_suitSprites != null && _suitSprites.Length >= 4)
-                            sprite = _suitSprites[idx];
-
-                        // Subtle discrepancies
-                        var srt = _suitCenter.rectTransform;
-                        srt.localScale    = _suitBaseScale * 0.92f; // slightly smaller
-                        srt.localRotation = Quaternion.Euler(0, 0, -7f); // slight tilt
-                        srt.anchoredPosition = _suitBasePos + new Vector2(1.5f, 0f); // px nudge
-                        _suitCenter.color = new Color(0.95f, 0.95f, 0.95f, 1f);
-                    }
-                }
-
-                // Fallbacks for non-cursed or sprite not found
-                if (sprite == null)
-                {
-                    if (_suitSprites != null && _suitSprites.Length >= 4)
-                        sprite = _suitSprites[idx];
-                }
-
-                _suitCenter.sprite = sprite;
-                _suitCenter.enabled = sprite != null;
-            }
-
-            if (_button) _button.interactable = true;
-        }
-
-        void ApplyRank(TMP_Text t, string rank, Color color, bool isTopLeft)
-        {
-            if (!t) return;
-            bool isDouble = rank.Length > 1;
-            t.enableAutoSizing = false;
-            t.fontSize = isDouble ? _rankSizeDouble : _rankSizeSingle;
-            t.characterSpacing = isDouble ? _rankTightenForDouble : 0f;
-            t.text = rank;
-            t.color = color;
-
-            var rt = t.rectTransform;
-            Vector2 basePos = isTopLeft ? _rankTLBasePos : _rankBRBasePos;
-            float dir = isTopLeft ? +1f : -1f;
-            float x = isDouble ? dir * _rankOffsetDoubleX : 0;
-            rt.anchoredPosition = basePos + new Vector2(x, 0f);
-        }
-
-        void ToggleFace(bool faceUp)
-        {
-            if (_frontRoot) _frontRoot.SetActive(faceUp);
-            if (_backRoot) _backRoot.SetActive(!faceUp);
-        }
-
-        string RankString(int value)
-        {
-            switch (value)
-            {
-                case 14: return "A";
-                case 13: return "K";
-                case 12: return "Q";
-                case 11: return "J";
-                default: return Mathf.Clamp(value, 2, 10).ToString();
+                _button.onClick.RemoveListener(
+                    HandleButtonClicked);
             }
         }
 
-        public void SetInteractable(bool canClick)
+        public void ShowFaceDown()
         {
-            if (_button) _button.interactable = canClick;
-        }
+            SetFaceVisible(faceUp: false);
+            ClearSelection();
+            ClearSelectionState();
 
-        // === Anim helpers (unchanged) ===
-        public IEnumerator RaiseThenFlash(float raisePixels, float raiseSeconds, Color flash, float flashSeconds)
-        {
-            if (_rt)
+            if (_background != null)
             {
-                Vector2 from = _rt.anchoredPosition;
-                Vector2 to = from + new Vector2(0f, raisePixels);
-                float t = 0f;
-                while (t < raiseSeconds)
-                {
-                    t += Time.deltaTime;
-                    float a = Mathf.Clamp01(t / raiseSeconds);
-                    _rt.anchoredPosition = Vector2.Lerp(from, to, a);
-                    yield return null;
-                }
-            }
-            if (_bg)
-            {
-                Color orig = _bg.color;
-                _bg.color = flash;
-                yield return new WaitForSeconds(flashSeconds);
-                _bg.color = orig;
+                _background.color =
+                    _faceDownBackgroundColor;
             }
         }
 
-        public IEnumerator RaiseOnly(float raisePixels, float raiseSeconds)
+        public void ShowFaceUp(
+            CardData card,
+            CurseVisualMode curseVisualMode)
         {
-            if (_rt)
+            SetFaceVisible(faceUp: true);
+            ClearSelection();
+            ClearSelectionState(resetTint: true);
+
+            string rankText =
+                GetRankText(card.value);
+
+            Color symbolColor =
+                GetSymbolColor(card);
+
+            ApplyRank(
+                _topLeftRank,
+                rankText,
+                symbolColor,
+                isTopLeft: true);
+
+            ApplyRank(
+                _bottomRightRank,
+                rankText,
+                symbolColor,
+                isTopLeft: false);
+
+            ApplySuit(card);
+        }
+
+        public void ConfigureSelection(
+            int cardIndex,
+            Action<int> selectionCallback)
+        {
+            _cardIndex = cardIndex;
+            _selectionCallback = selectionCallback;
+
+            SetInteractable(true);
+        }
+
+        public void ClearSelection()
+        {
+            _selectionCallback = null;
+            SetInteractable(false);
+        }
+
+        public void SetInteractable(bool canSelect)
+        {
+            if (_button != null)
+                _button.interactable = canSelect;
+        }
+
+        public void SetTint(Color tint)
+        {
+            if (_background != null)
+                _background.color = tint;
+        }
+
+        public void ResetFaceTint()
+        {
+            if (_background != null)
             {
-                Vector2 from = _rt.anchoredPosition;
-                Vector2 to = from + new Vector2(0f, raisePixels);
-                float t = 0f;
-                while (t < raiseSeconds)
-                {
-                    t += Time.deltaTime;
-                    float a = Mathf.Clamp01(t / raiseSeconds);
-                    _rt.anchoredPosition = Vector2.Lerp(from, to, a);
-                    yield return null;
-                }
+                _background.color =
+                    _faceUpBackgroundColor;
             }
         }
 
-        public void ResetPosition()
+        public void ShowSelectionState(
+            Color selectionTint,
+            int selectionPosition,
+            bool showOrderNumber)
         {
-            if (_rt) _rt.anchoredPosition = _startAnchoredPos;
+            SetTint(selectionTint);
+
+            if (_selectionOrderText == null)
+                return;
+
+            bool shouldShowOrder =
+                showOrderNumber
+                && selectionPosition >= 0;
+
+            _selectionOrderText.gameObject.SetActive(
+                shouldShowOrder);
+
+            _selectionOrderText.text =
+                shouldShowOrder
+                    ? (selectionPosition + 1).ToString()
+                    : string.Empty;
+        }
+
+        public void ClearSelectionState(
+            bool resetTint = false)
+        {
+            if (_selectionOrderText != null)
+            {
+                _selectionOrderText.text =
+                    string.Empty;
+
+                _selectionOrderText.gameObject.SetActive(
+                    false);
+            }
+
+            if (resetTint)
+                ResetFaceTint();
+        }
+
+        public IEnumerator Raise(
+            float distancePixels,
+            float durationSeconds)
+        {
+            if (_rectTransform == null)
+                yield break;
+
+            Vector2 startingPosition =
+                _rectTransform.anchoredPosition;
+
+            Vector2 targetPosition =
+                startingPosition
+                + new Vector2(
+                    0f,
+                    distancePixels);
+
+            if (durationSeconds <= 0f)
+            {
+                _rectTransform.anchoredPosition =
+                    targetPosition;
+
+                yield break;
+            }
+
+            float elapsedSeconds = 0f;
+
+            while (elapsedSeconds < durationSeconds)
+            {
+                elapsedSeconds += Time.deltaTime;
+
+                float normalizedTime =
+                    Mathf.Clamp01(
+                        elapsedSeconds / durationSeconds);
+
+                _rectTransform.anchoredPosition =
+                    Vector2.Lerp(
+                        startingPosition,
+                        targetPosition,
+                        normalizedTime);
+
+                yield return null;
+            }
+
+            _rectTransform.anchoredPosition =
+                targetPosition;
+        }
+
+        private void CacheBaseTextPositions()
+        {
+            if (_topLeftRank != null)
+            {
+                _topLeftRankBasePosition =
+                    _topLeftRank.rectTransform
+                        .anchoredPosition;
+            }
+
+            if (_bottomRightRank != null)
+            {
+                _bottomRightRankBasePosition =
+                    _bottomRightRank.rectTransform
+                        .anchoredPosition;
+            }
+        }
+
+        private void CacheBaseSuitTransform()
+        {
+            if (_centerSuit == null)
+                return;
+
+            RectTransform suitRectTransform =
+                _centerSuit.rectTransform;
+
+            _suitBaseScale =
+                suitRectTransform.localScale;
+
+            _suitBaseRotation =
+                suitRectTransform.localRotation;
+
+            _suitBasePosition =
+                suitRectTransform.anchoredPosition;
+        }
+
+        private void ApplyRank(
+            TMP_Text rankComponent,
+            string rankText,
+            Color rankColor,
+            bool isTopLeft)
+        {
+            if (rankComponent == null)
+                return;
+
+            bool hasTwoCharacters =
+                rankText.Length > 1;
+
+            rankComponent.enableAutoSizing = false;
+
+            rankComponent.fontSize = hasTwoCharacters
+                ? _doubleCharacterRankSize
+                : _singleCharacterRankSize;
+
+            rankComponent.characterSpacing =
+                hasTwoCharacters
+                    ? _doubleCharacterSpacing
+                    : 0f;
+
+            rankComponent.text = rankText;
+            rankComponent.color = rankColor;
+
+            Vector2 basePosition = isTopLeft
+                ? _topLeftRankBasePosition
+                : _bottomRightRankBasePosition;
+
+            float direction =
+                isTopLeft ? 1f : -1f;
+
+            float horizontalOffset =
+                hasTwoCharacters
+                    ? direction
+                      * _doubleCharacterHorizontalOffset
+                    : 0f;
+
+            rankComponent.rectTransform
+                .anchoredPosition =
+                basePosition
+                + new Vector2(
+                    horizontalOffset,
+                    0f);
+        }
+
+        private void ApplySuit(
+            CardData card)
+        {
+            if (_centerSuit == null)
+                return;
+
+            RectTransform suitRectTransform =
+                _centerSuit.rectTransform;
+
+            suitRectTransform.localScale =
+                _suitBaseScale;
+
+            suitRectTransform.localRotation =
+                _suitBaseRotation;
+
+            suitRectTransform.anchoredPosition =
+                _suitBasePosition;
+
+            int suitIndex =
+                Mathf.Clamp(
+                    (int)card.suit,
+                    0,
+                    3);
+
+            Sprite selectedSprite =
+                card.cursed
+                    ? GetSpriteAt(
+                        _reversedColorSuitSprites,
+                        suitIndex)
+                    : GetSpriteAt(
+                        _normalSuitSprites,
+                        suitIndex);
+
+            if (selectedSprite == null)
+            {
+                selectedSprite =
+                    GetSpriteAt(
+                        _normalSuitSprites,
+                        suitIndex);
+            }
+
+            _centerSuit.sprite = selectedSprite;
+            _centerSuit.enabled =
+                selectedSprite != null;
+
+            _centerSuit.color =
+                GetSymbolColor(card);
+        }
+
+        private Color GetSymbolColor(
+            CardData card)
+        {
+            bool isNormallyRed =
+                card.suit == Suit.Hearts
+                || card.suit == Suit.Diamonds;
+
+            if (card.cursed)
+                isNormallyRed = !isNormallyRed;
+
+            return isNormallyRed
+                ? _redRankColor
+                : _blackRankColor;
+        }
+
+        private void SetFaceVisible(bool faceUp)
+        {
+            if (_frontRoot != null)
+                _frontRoot.SetActive(faceUp);
+
+            if (_backRoot != null)
+                _backRoot.SetActive(!faceUp);
+        }
+
+        private void HandleButtonClicked()
+        {
+            _selectionCallback?.Invoke(
+                _cardIndex);
+        }
+
+        private static Sprite GetSpriteAt(
+            Sprite[] sprites,
+            int index)
+        {
+            if (sprites == null
+                || index < 0
+                || index >= sprites.Length)
+            {
+                return null;
+            }
+
+            return sprites[index];
+        }
+
+        private static string GetRankText(int value)
+        {
+            return value switch
+            {
+                14 => "A",
+                13 => "K",
+                12 => "Q",
+                11 => "J",
+                _ => Mathf.Clamp(
+                    value,
+                    2,
+                    10).ToString()
+            };
         }
     }
 }
-
